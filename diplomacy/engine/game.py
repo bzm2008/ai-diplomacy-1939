@@ -3712,6 +3712,9 @@ class Game(Jsonable):
             manager = getattr(self, 'card_manager', None)
             if manager is not None and hasattr(manager, 'protection_bonus'):
                 strength += manager.protection_bonus(self, unit)
+            mech = getattr(self, 'mechanics_manager', None)
+            if mech is not None and hasattr(mech, 'joint_attack_bonus'):
+                strength += mech.joint_attack_bonus(self, unit)
             self.combat \
                 .setdefault(place, {}) \
                 .setdefault(strength + self.supports[unit][0], []) \

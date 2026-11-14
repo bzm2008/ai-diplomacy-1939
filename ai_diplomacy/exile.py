@@ -142,6 +142,10 @@ class ExileRegistry:
         return None
 
     def can_host(self, game: Any, host: str) -> bool:
+        from .mechanics import MAJOR_POWERS
+
+        if host not in MAJOR_POWERS:
+            return False
         if not is_normal_active(game, host):
             return False
         return self.hosted_by(host) is None
@@ -160,8 +164,12 @@ class ExileRegistry:
         """After a phase resolves: newly eliminated powers enter seeking."""
         if not exile_enabled():
             return []
+        from .mechanics import MAJOR_POWERS
+
         triggered = []
         for name in sorted(game.powers):
+            if name not in MAJOR_POWERS:
+                continue
             if not _is_engine_eliminated(game, name):
                 continue
             if name in self.seeking or name in self.exiled or name in self.processed:

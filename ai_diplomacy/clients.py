@@ -114,6 +114,7 @@ class BaseModelClient:
         parsed_orders_for_return = self.fallback_orders(possible_orders)  # Default to fallback
         self._last_card_play = None
         self._last_bonus_move = None
+        self._last_puppet_orders = None
 
         try:
             strict_mode = os.environ.get("DIP_STRICT_MODEL_RESPONSES") == "1"
@@ -147,6 +148,8 @@ class BaseModelClient:
                 self._last_card_play = self._extract_card_play(formatted_response, power_name)
                 # Same side-channel pattern for Germany's bonus move (passive).
                 self._last_bonus_move = self._extract_bonus_move(formatted_response, power_name)
+                # Same side-channel pattern for overlord puppet directives.
+                self._last_puppet_orders = self._extract_puppet_orders(formatted_response, power_name)
                 move_list = self._extract_moves(formatted_response, power_name)
                 if not move_list:
                     if strict_mode:
@@ -169,7 +172,7 @@ class BaseModelClient:
 
                 validated_moves, invalid_moves_list = self._validate_orders(move_list, possible_orders)
                 if self._last_card_play and str(self._last_card_play.get("card", "")).lower() in {
-                    "uk_upgrade", "fr_cluster", "de_cluster", "pl_cluster", "su_cluster"
+                    "uk_upgrade", "fr_cluster", "de_cluster", "pl_cluster", "su_cluster", "es_cluster"
                 }:
                     validated_moves = await self._run_cluster_selection(
                         prompt, formatted_response, validated_moves, possible_orders, power_name
@@ -279,6 +282,38 @@ class BaseModelClient:
                 if isinstance(play, dict):
                     return play
                 logger.info("[%s] Ignoring malformed play_card for %s", self.model_name, power_name)
+                return None
+        return None
+
+    def _extract_puppet_orders(self, raw_response: str, power_name: str = "") -> Optional[dict]:
+        """Extract optional ``puppet_orders`` data without changing order parsing.
+
+        Returns ``{puppet: {location: order}}`` or None. The overlord's
+        directives apply one movement phase later (see puppets.py).
+        """
+        if not raw_response:
+            return None
+        candidates = []
+        for pattern in (
+            r"PARSABLE OUTPUT:\s*(\{[\s\S]*\})",
+            r"```(?:json)?\s*\n(\{[\s\S]*?\})\s*\n```",
+            r"(\{[\s\S]*\"orders\"\s*:\s*\[[\s\S]*?\][\s\S]*\})",
+        ):
+            match = re.search(pattern, raw_response, re.DOTALL)
+            if match:
+                candidates.append(match.group(1).strip())
+        for candidate in candidates:
+            for text in (candidate, re.sub(r",\s*([}\]])", r"\1", candidate), candidate.replace("'", '"')):
+                try:
+                    data = json.loads(text)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                puppet_orders = data.get("puppet_orders") if isinstance(data, dict) else None
+                if puppet_orders is None:
+                    return None
+                if isinstance(puppet_orders, dict):
+                    return puppet_orders
+                logger.info("[%s] Ignoring malformed puppet_orders for %s", self.model_name, power_name)
                 return None
         return None
 
@@ -552,6 +587,12 @@ class BaseModelClient:
             _phase = ""
         if re.match(r"^[SF]\d{4}M$", _phase):
             context += "\n\n" + card_context_for_power(get_card_manager(game), power_name)
+            context += (
+                "\n\n【出牌评估】你必须在本阶段的计划里逐张评估手里的每张卡牌："
+                "说明本阶段出还是不出、以及理由。不要只说“留着以后用”——"
+                "要说清在等什么具体触发条件（比如“等德国打波兰时再出”）。"
+                "手里没有卡牌时写“无牌可出”即可。"
+            )
 
         return context + "\n\n" + instructions
 
@@ -611,6 +652,16 @@ class BaseModelClient:
                 unanswered_messages += f"\nFrom {msg['sender']} in {msg['phase']}: {msg['content']}\n"
         else:
             unanswered_messages += "\nNo urgent messages requiring direct responses.\n"
+
+        # Negotiation hand reminder (movement phases): the hand is public
+        # knowledge in the order prompt; surface it here too so talks can
+        # reference real cards instead of guessing.
+        try:
+            _phase = str(game.get_current_phase())
+        except Exception:
+            _phase = ""
+        if re.match(r"^[SF]\d{4}M$", _phase):
+            context += "\n\n" + card_context_for_power(get_card_manager(game), power_name)
 
         final_prompt = context + unanswered_messages + "\n\n" + instructions
         final_prompt = (

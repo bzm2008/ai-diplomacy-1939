@@ -39,7 +39,7 @@ CARD_DEFINITIONS: dict[str, CardDefinition] = {
     "it_upgrade": _card("it_upgrade", "ITALY", "升格", "upgrade"),
     "it_mare": _card("it_mare", "ITALY", "我们的海", "protect"),
     "it_pact": _card("it_pact", "ITALY", "钢铁条约", "iron_pact"),
-    "es_upgrade": _card("es_upgrade", "SPAIN", "升格", "upgrade"),
+    "es_cluster": _card("es_cluster", "SPAIN", "集群", "cluster"),
     "es_watch": _card("es_watch", "SPAIN", "观望", "protect_isolation"),
     "es_wind": _card("es_wind", "SPAIN", "见风使舵", "sway", True),
     "fr_cluster": _card("fr_cluster", "FRANCE", "集群", "cluster"),
@@ -59,7 +59,6 @@ CARD_DEFINITIONS: dict[str, CardDefinition] = {
 UPGRADE_MODELS = {
     "us_upgrade": "gpt-6-astra",
     "it_upgrade": "doubao-seed-2.1-pro",
-    "es_upgrade": "gemini-4-carbon",
 }
 
 
@@ -214,8 +213,8 @@ class CardManager:
                 start_year = int(os.environ.get("DIP_MANHATTAN_FROM_YEAR", "1942"))
                 if not year_match or int(year_match.group(0)) < start_year:
                     return False, f"曼哈顿计划须在 {start_year} 年或之后使用"
-                if max((len(power.centers) for power in game.powers.values()), default=0) < 18:
-                    return False, "至少一个国家需要达到 18 个中心"
+                if max((len(power.centers) for power in game.powers.values()), default=0) < 26:
+                    return False, "至少一个国家需要达到 26 个中心"
         self.remaining[power].remove(card_id)
         declaration = {
             "card_id": card_id,
@@ -346,11 +345,11 @@ CARD_EFFECTS: dict[str, str] = {
     "uk_ultra": "须指定目标国家（target写国家英文名）。下个移动阶段：你可以看到该国本阶段提交的全部指令，并选择其中一条作废。",
     "us_upgrade": "立即生效：换上更强的模型（默认为GPT-6 Astra），持续4个阶段，之后自动换回。代价：下个调整阶段建造-1。",
     "us_industry": "下个移动阶段生效：下个调整阶段建造+2。",
-    "us_manhattan": "须1942年或之后、且至少一个国家达到18个中心才能出。下个移动阶段生效：中心数最多的非美国国家在下个调整阶段多解散2支部队。",
+    "us_manhattan": "须1942年或之后、且至少一个国家达到26个中心才能出。下个移动阶段生效：中心数最多的非美国国家在下个调整阶段多解散2支部队。",
     "it_upgrade": "立即生效：换上更强的模型（默认为豆包Seed 2.1 Pro），持续4个阶段，之后自动换回。代价：下个调整阶段建造-1。",
     "it_mare": "下个移动阶段起，持续2个阶段：那不勒斯、罗马、威尼斯的守军强度+10。",
     "it_pact": "下个移动阶段：你可以看到德国本阶段提交的全部指令，然后重新下一遍自己的指令。",
-    "es_upgrade": "立即生效：换上更强的模型（默认为Gemini 4 Carbon），持续4个阶段，之后自动换回。代价：下个调整阶段建造-1。",
+    "es_cluster": _CLUSTER_EFFECT,
     "es_watch": "下个移动阶段起，持续2个阶段：你所有单位所在省份的守军强度+10；期间你不能进攻外国单位。",
     "es_wind": "须指定目标国家（target写国家英文名）。宣告后立即生效：西班牙对该国的关系变为友好。",
     "fr_cluster": _CLUSTER_EFFECT,

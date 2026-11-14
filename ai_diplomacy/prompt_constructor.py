@@ -28,14 +28,23 @@ logger.setLevel(logging.DEBUG)  # Or inherit from parent logger
 
 # --- Home-center lookup -------------------------------------------
 HOME_CENTERS: dict[str, list[str]] = {
-    "BRITAIN": ["Edinburgh", "Liverpool", "London"],
-    "FRANCE": ["Brest", "Marseilles", "Paris"],
-    "GERMANY": ["Berlin", "Kiel", "Munich", "Vienna"],
-    "ITALY": ["Naples", "Rome", "Venice"],
+    # 1937 map home centers (upgraded provinces included; VIE is unowned).
+    "BRITAIN": ["Edinburgh", "Liverpool", "London", "Clyde", "Wales", "Yorkshire"],
+    "FRANCE": ["Brest", "Marseilles", "Paris", "Burgundy", "Gascony", "Picardy"],
+    "GERMANY": ["Berlin", "Kiel", "Munich", "Silesia"],
+    "ITALY": ["Naples", "Rome", "Venice", "Apulia", "Tuscany", "Piedmont"],
     "POLAND": ["Warsaw", "Galicia", "Prussia"],
-    "SOVIET": ["Moscow", "Saint Petersburg", "Sevastopol", "Ukraine"],
+    "SOVIET": ["Moscow", "Saint Petersburg", "Sevastopol", "Ukraine", "Armenia"],
     "SPAIN": ["Spain", "North Africa"],
     "USA": ["New York", "Boston", "Washington"],
+    "PORTUGAL": ["Portugal", "Azores"],
+    "HOLLAND": ["Holland"],
+    "BELGIUM": ["Belgium"],
+    "NORWAY": ["Norway"],
+    "DENMARK": ["Denmark", "Iceland"],
+    "GREECE": ["Greece"],
+    "ROMANIA": ["Romania"],
+    "TURKEY": ["Constantinople", "Smyrna", "Ankara"],
 }
 
 
