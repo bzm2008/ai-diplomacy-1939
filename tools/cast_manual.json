@@ -1,0 +1,14 @@
+{
+ "seed": null,
+ "note": "手动指定，不抽签。意大利用豆包（中国网友觉得意大利不靠谱，节目效果好）",
+ "assign": {
+  "BRITAIN": "claude",
+  "FRANCE": "kimi",
+  "GERMANY": "grok",
+  "ITALY": "doubao",
+  "POLAND": "glm",
+  "SOVIET": "deepseek",
+  "SPAIN": "gemini",
+  "USA": "gpt"
+ }
+}

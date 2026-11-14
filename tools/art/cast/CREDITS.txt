@@ -1,0 +1,11 @@
+角色立绘来源（视频里须署名，CC BY-NC-SA 4.0：署名、非商用、相同方式共享）
+
+BRITAIN_claude.png   ZipZipPipe 原图 https://www.bilibili.com/opus/1233069202138464289
+GERMANY_grok.png     ZipZipPipe 原图（同上）
+USA_gpt.png          ZipZipPipe 原图（同上）
+POLAND_deepseek.png  鲸鱼娘：上善无形“溟月” → ZipZipPipe → Small-tailqwq，经 JAdpp/dsh-whale-galgame
+FRANCE_kimi.png      JAdpp/dsh-whale-galgame 的 AI 辅助立绘（非 ZipZipPipe），CC BY-NC-SA 4.0
+SPAIN_gemini.png     同上
+ITALY_doubao.png     本项目用 bai edit（gpt-image-2）以 ZipZipPipe 的 Claude、Grok 立绘为画风参考生成
+SOVIET_glm.png       本项目用 bai edit（gpt-image-2）以 ZipZipPipe 的 Claude 立绘和鲸鱼娘为画风参考生成
+仓库与许可：https://github.com/JAdpp/dsh-whale-galgame （NOTICE.md 副本在 ../zipzippipe/）

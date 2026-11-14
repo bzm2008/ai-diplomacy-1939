@@ -1,0 +1,13 @@
+{
+  "seed": 1,
+  "assign": {
+    "BRITAIN": "glm",
+    "FRANCE": "qwen",
+    "GERMANY": "gpt",
+    "ITALY": "grok",
+    "POLAND": "gemini",
+    "SOVIET": "deepseek",
+    "SPAIN": "kimi",
+    "USA": "claude"
+  }
+}
