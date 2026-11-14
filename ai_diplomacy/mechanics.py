@@ -72,6 +72,17 @@ def phase_year(phase: str) -> Optional[int]:
     return parsed[1] if parsed else None
 
 
+# 施佩尔奇迹 (Speer miracle): Germany's wartime armaments surge. The build
+# bonus mirrors the USA arsenal hook below; the broadcast notice in
+# mechanics_context_for_power deliberately omits the end year (only
+# Germany's own system prompt states the 1944 expiry).
+SPEER_MIRACLE_YEARS = (1942, 1944)
+
+
+def speer_miracle_active(year: Optional[int]) -> bool:
+    return year is not None and SPEER_MIRACLE_YEARS[0] <= year <= SPEER_MIRACLE_YEARS[1]
+
+
 def phase_season(phase: str) -> Optional[str]:
     parsed = parse_phase(phase)
     return parsed[0] if parsed else None
@@ -250,8 +261,9 @@ class MechanicsManager:
         """Adjust an adjustment-phase balance (centers - units, card-adjusted).
 
         Positive = builds allowed, negative = disbands required. Applies, in
-        order: exile disband exemption, USA arsenal bonus, famine build ban,
-        exile-funding build cost. Only active during adjustment phases.
+        order: exile disband exemption, USA arsenal bonus, Germany Speer
+        bonus, famine build ban, exile-funding build cost. Only active
+        during adjustment phases.
         """
         if getattr(game, "phase_type", None) != "A":
             return balance
@@ -265,6 +277,10 @@ class MechanicsManager:
         if passives_enabled() and power_name == "USA" and year >= 1941:
             # 民主兵工厂: one extra build each winter; the same +1 also
             # exempts the overbuilt unit from forced disband next winter.
+            balance += 1
+        if passives_enabled() and power_name == "GERMANY" and speer_miracle_active(year):
+            # 施佩尔奇迹: one extra build each winter 1942-1944; the same +1
+            # also exempts the overbuilt unit from forced disband while active.
             balance += 1
         if events_enabled():
             famine_target = self.events.famine_target_for_year(year)
@@ -306,6 +322,14 @@ def mechanics_context_for_power(
     if manager is None:
         return ""
     blocks: list[str] = []
+    if passives_enabled() and speer_miracle_active(phase_year(phase)):
+        # Broadcast to every power: the fact is public (builds are visible
+        # on the board anyway); the 1944 expiry is stated only in
+        # Germany's own system prompt.
+        blocks.append(
+            "【历史事件·施佩尔奇迹】1942 年，施佩尔出任德国军备部长，德国军工产量大幅提升："
+            "德国每个冬季可多建造一支单位。"
+        )
     if events_enabled():
         block = manager.events.context_block_for_power(game, power_name, agent_relationships or {}, phase)
         if block:

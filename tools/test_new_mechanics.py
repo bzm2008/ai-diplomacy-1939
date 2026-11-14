@@ -30,11 +30,12 @@ from ai_diplomacy.exile import is_active, is_normal_active  # noqa: E402
 from ai_diplomacy.game_history import GameHistory  # noqa: E402
 from ai_diplomacy.game_logic import save_game_state  # noqa: E402
 from ai_diplomacy.mechanics import (  # noqa: E402
-    add_unit, get_mechanics_manager, move_unit, remove_unit,
+    add_unit, get_mechanics_manager, mechanics_context_for_power, move_unit,
+    remove_unit, speer_miracle_active,
 )
 from ai_diplomacy.negotiations import conduct_negotiations  # noqa: E402
 from ai_diplomacy.passives import (  # noqa: E402
-    apply_bonus_move, diplomacy_brief, filter_mechanics_orders,
+    PASSIVE_TEXTS, apply_bonus_move, diplomacy_brief, filter_mechanics_orders,
 )
 
 PASSED = []
@@ -213,6 +214,55 @@ def test_passives():
         remove_unit(g, "USA", usa.units[0])
     raw = len(usa.centers) - len(usa.units)
     check("美国 1941 年前无加成", g._adjustment_balance(g.powers["USA"]) == raw, f"raw={raw}")
+
+    # 德国施佩尔奇迹：1942-1944 年冬季 +1 建造，1945 年起失效；有效期内超建豁免
+    for winter, expected_bonus in [("W1941A", 0), ("W1942A", 1), ("W1943A", 1),
+                                   ("W1944A", 1), ("W1945A", 0)]:
+        g = fresh_game()
+        remove_unit(g, "FRANCE", g.powers["FRANCE"].units[0])  # 制造不平衡，否则引擎跳过冬季
+        advance_to(g, winter)
+        ger = g.powers["GERMANY"]
+        while len(ger.units) > len(ger.centers) - 1:
+            remove_unit(g, "GERMANY", ger.units[0])
+        raw = len(ger.centers) - len(ger.units)
+        check(f"施佩尔奇迹 {winter} 加成 {expected_bonus}",
+              g._adjustment_balance(g.powers["GERMANY"]) == raw + expected_bonus,
+              f"raw={raw} adjusted={g._adjustment_balance(g.powers['GERMANY'])}")
+    g = fresh_game()
+    remove_unit(g, "FRANCE", g.powers["FRANCE"].units[0])
+    advance_to(g, "W1943A")
+    ger = g.powers["GERMANY"]
+    occupied = {u.split()[-1].split("/")[0] for p in g.powers.values() for u in p.units}
+    empties = [loc for loc in sorted(g.map.loc_type) if g.map.loc_type[loc] != "WATER" and loc not in occupied]
+    while len(ger.units) <= len(ger.centers):
+        add_unit(g, "GERMANY", f"A {empties.pop(0)}")
+    check("施佩尔奇迹超建豁免（balance 不为负）", g._adjustment_balance(g.powers["GERMANY"]) == 0,
+          f"units={len(ger.units)} centers={len(ger.centers)}")
+    g = fresh_game()
+    remove_unit(g, "FRANCE", g.powers["FRANCE"].units[0])
+    advance_to(g, "W1945A")
+    ger = g.powers["GERMANY"]
+    occupied = {u.split()[-1].split("/")[0] for p in g.powers.values() for u in p.units}
+    empties = [loc for loc in sorted(g.map.loc_type) if g.map.loc_type[loc] != "WATER" and loc not in occupied]
+    while len(ger.units) <= len(ger.centers):
+        add_unit(g, "GERMANY", f"A {empties.pop(0)}")
+    check("施佩尔奇迹 1945 年失效后超建须解散", g._adjustment_balance(g.powers["GERMANY"]) == -1,
+          f"units={len(ger.units)} centers={len(ger.centers)}")
+    # 广播：1942-1944 年所有国家可见事实，但看不到截止期；1945 年消失
+    g = fresh_game()
+    for ph in ["F1942M", "S1943M", "W1944A"]:
+        for pw in ["BRITAIN", "GERMANY", "USA"]:
+            block = mechanics_context_for_power(g, GameHistory(), pw, {}, ph)
+            check(f"施佩尔广播 {ph} {pw} 可见", "施佩尔奇迹" in block, block[:80])
+            check(f"施佩尔广播 {ph} {pw} 不透露截止期", "1944" not in block, block[:80])
+    block45 = mechanics_context_for_power(g, GameHistory(), "FRANCE", {}, "S1945M")
+    check("施佩尔广播 1945 年消失", "施佩尔奇迹" not in block45, block45[:80])
+    check("德国提示词写明截止期",
+          "1944" in PASSIVE_TEXTS["GERMANY"] and "施佩尔奇迹" in PASSIVE_TEXTS["GERMANY"])
+    check("施佩尔年份判定",
+          speer_miracle_active(1942) and speer_miracle_active(1944)
+          and not speer_miracle_active(1941) and not speer_miracle_active(1945)
+          and not speer_miracle_active(None))
 
     # 西班牙：绝不成为针对性事件目标
     g = fresh_game()
