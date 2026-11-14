@@ -37,6 +37,14 @@ from ai_diplomacy.cards import (
     prepare_special_orders,
     upgrade_model_spec,
 )
+from ai_diplomacy.exile import is_active
+from ai_diplomacy.mechanics import (
+    get_mechanics_manager,
+    is_adjustment_phase,
+    is_spring_phase,
+    passives_enabled,
+)
+from ai_diplomacy.passives import apply_bonus_move, filter_mechanics_orders
 from ai_diplomacy.clients import load_model_client
 from config import config
 
@@ -386,6 +394,8 @@ async def main():
 
     if getattr(game, "card_manager", None) is None:
         game.card_manager = CardManager()
+    # 1939 mechanics state (events + exile); attached once, persisted with saves.
+    get_mechanics_manager(game)
 
     if _detect_victory(game):
         game.is_game_done = True          # short-circuit the main loop
@@ -413,6 +423,16 @@ async def main():
         game_history.add_phase(current_phase)
         card_manager = get_card_manager(game)
         card_manager.begin_phase(current_phase)
+        # 1939 mechanics, phase start: expire/activate events, draw the yearly
+        # Spring event (before negotiations, so it is known during talks),
+        # and finalize winter exile funding before orders are generated.
+        mechanics = get_mechanics_manager(game)
+        if current_short_phase.endswith("M"):
+            mechanics.events.begin_phase(game, current_phase)
+            if is_spring_phase(current_phase):
+                mechanics.events.draw_event(game, game_history, current_phase)
+        if is_adjustment_phase(current_phase):
+            mechanics.exile.begin_winter(game, current_phase)
         for agent in agents.values():
             if agent.card_model_phases_remaining > 0:
                 agent.card_model_phases_remaining -= 1
@@ -438,7 +458,7 @@ async def main():
             
             neg_diary_tasks = [
                 agent.generate_negotiation_diary_entry(game, game_history, llm_log_file_path)
-                for agent in agents.values() if not game.powers[agent.power_name].is_eliminated()
+                for agent in agents.values() if is_active(game, agent.power_name)
             ]
             if neg_diary_tasks:
                 diary_results = await asyncio.gather(*neg_diary_tasks, return_exceptions=True)
@@ -446,6 +466,8 @@ async def main():
                     failures = [result for result in diary_results if isinstance(result, Exception)]
                     if failures:
                         raise RuntimeError(f"Strict model pause during diary generation: {failures[0]}") from failures[0]
+            # Exile decisions recorded in the diaries take effect before orders.
+            get_mechanics_manager(game).exile.resolve_pending(game, current_phase)
 
         # --- 4c. Parallel Order Generation and Diary Consolidation ---
         # Start diary consolidation in parallel with order generation
@@ -455,7 +477,7 @@ async def main():
                 run_diary_consolidation(agent, game, llm_log_file_path,
                                         prompts_dir=agent.prompts_dir)
                 for agent in agents.values()
-                if not game.powers[agent.power_name].is_eliminated()
+                if is_active(game, agent.power_name)
             ]
             if consolidation_tasks:
                 # Start consolidation tasks but don't await yet
@@ -466,7 +488,7 @@ async def main():
         board_state = game.get_state()
         order_tasks = []
         for power_name, agent in agents.items():
-            if not game.powers[power_name].is_eliminated():
+            if is_active(game, power_name):
                 possible_orders = gather_possible_orders(game, power_name)
                 if not possible_orders:
                     game.set_orders(power_name, [])
@@ -492,15 +514,17 @@ async def main():
         if consolidation_future:
             await consolidation_future
         
-        active_powers = [p for p, a in agents.items() if not game.powers[p].is_eliminated()]
+        active_powers = [p for p, a in agents.items() if is_active(game, p)]
         order_power_names = [p for p in active_powers if gather_possible_orders(game, p)]
         submitted_orders_this_phase = defaultdict(list)
 
         raw_orders_by_power = {}
         card_plays_by_power = {}
+        bonus_moves_by_power = {}
         for i, result in enumerate(order_results):
             p_name = order_power_names[i]
             card_play = None
+            bonus_move = None
 
             if isinstance(result, Exception):
                 logger.error("Error getting orders for %s: %s", p_name, result, exc_info=result)
@@ -509,6 +533,7 @@ async def main():
                 valid   = result.get("valid", [])
                 invalid = result.get("invalid", [])
                 card_play = result.get("card")
+                bonus_move = result.get("bonus_move")
 
             if card_play is not None and current_short_phase.endswith("M"):
                 accepted, card_error = card_manager.validate_play(p_name, card_play, current_phase, game=game)
@@ -544,6 +569,10 @@ async def main():
             # what the engine will actually execute
             raw_orders_by_power[p_name] = valid
 
+            # Germany's bonus move (passive) is applied after resolution.
+            if bonus_move:
+                bonus_moves_by_power[p_name] = bonus_move
+
             # what we record for prompt/history purposes
             submitted_orders_this_phase[p_name] = valid + invalid
 
@@ -560,6 +589,13 @@ async def main():
             )
         # Apply public special-card rewrites only after all orders are known.
         raw_orders_by_power = prepare_special_orders(game, raw_orders_by_power)
+        # 1939 mechanics: passive + event order filters (support-required
+        # attacks, strikes, storm, Winter General). Needs all orders known.
+        if current_short_phase.endswith("M"):
+            raw_orders_by_power, _mechanics_forbidden = filter_mechanics_orders(
+                game, raw_orders_by_power, current_phase,
+                get_mechanics_manager(game).events.active_filter_effect(),
+            )
         for p_name, valid in raw_orders_by_power.items():
             game.set_orders(p_name, valid)
 
@@ -569,6 +605,26 @@ async def main():
         logger.info(f"Results for {current_phase}:")
         for power_name, power in game.powers.items():
             logger.info(f"{power_name}: {power.centers}")
+
+        # --- 4d2. Mechanics post-resolution effects ---
+        mechanics = get_mechanics_manager(game)
+        if current_short_phase.endswith("M") and is_spring_phase(current_phase) and passives_enabled():
+            bonus = bonus_moves_by_power.get("GERMANY")
+            if bonus:
+                ok, why = apply_bonus_move(
+                    game, "GERMANY", str(bonus.get("unit", "")), str(bonus.get("target", "")),
+                    submitted_orders_this_phase.values(),
+                )
+                if not ok:
+                    logger.info("[被动] 德国机动战奖励移动被忽略：%s", why)
+        registry = mechanics.exile
+        registry.detect_triggers(game, completed_phase)
+        registry.check_hosts_down(game, completed_phase)
+        registry.check_restorations(game, completed_phase)
+        if current_short_phase.endswith("M"):
+            registry.end_movement_phase(game, completed_phase)
+        if is_adjustment_phase(current_phase):
+            registry.complete_winter(game, completed_phase)
 
         # --- 4e. Post-Processing and State Updates ---
         phase_history_from_game = game.get_phase_history()
@@ -597,7 +653,7 @@ async def main():
         if current_short_phase.endswith("M"):
             phase_result_diary_tasks = [
                 agent.generate_phase_result_diary_entry(game, game_history, phase_summary, all_orders_this_phase, llm_log_file_path, current_short_phase)
-                for agent in agents.values() if not game.powers[agent.power_name].is_eliminated()
+                for agent in agents.values() if is_active(game, agent.power_name)
             ]
             if phase_result_diary_tasks:
                 await asyncio.gather(*phase_result_diary_tasks, return_exceptions=True)
@@ -609,10 +665,12 @@ async def main():
             current_board_state = game.get_state()
             state_update_tasks = [
                 agent.analyze_phase_and_update_state(game, current_board_state, phase_summary, game_history, llm_log_file_path)
-                for agent in agents.values() if not game.powers[agent.power_name].is_eliminated()
+                for agent in agents.values() if is_active(game, agent.power_name)
             ]
             if state_update_tasks:
                 await asyncio.gather(*state_update_tasks, return_exceptions=True)
+            # No-press mode: exile intents come from state updates instead.
+            get_mechanics_manager(game).exile.resolve_pending(game, current_phase)
 
         # --- 4f. Save State At End of Phase ---
         await save_game_state(game, agents, game_history, game_file_path, run_config, completed_phase)

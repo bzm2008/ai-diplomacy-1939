@@ -13,6 +13,7 @@ from diplomacy.utils.export import to_saved_game_format, from_saved_game_format
 
 from .agent import DiplomacyAgent, ALL_POWERS
 from .clients import load_model_client
+from .exile import is_active
 from .game_history import GameHistory
 from .initialization import initialize_agent_state_ext
 from .utils import atomic_write_json, atomic_write_json_async, assign_models_to_powers
@@ -137,7 +138,7 @@ async def save_game_state(
     current_state_agents = {
         p_name: serialize_agent(p_agent)
         for p_name, p_agent in agents.items()
-        if not game.powers[p_name].is_eliminated()
+        if is_active(game, p_name)
     }
 
     for phase_block in saved_game.get("phases", []):
@@ -169,6 +170,8 @@ async def save_game_state(
     saved_game["phase_summaries"] = getattr(game, "phase_summaries", {})
     from .cards import get_card_manager
     saved_game["card_state"] = get_card_manager(game).to_dict()
+    from .mechanics import get_mechanics_manager
+    saved_game["mechanics_state"] = get_mechanics_manager(game).to_dict()
     saved_game["final_agent_states"] = {
         p_name: {"relationships": a.relationships, "goals": a.goals} for p_name, a in agents.items()
     }
@@ -220,6 +223,11 @@ def load_game_state(
     game.phase_summaries = saved_game_data.get("phase_summaries", {})
     from .cards import CardManager
     game.card_manager = CardManager.from_dict(saved_game_data.get("card_state", {}))
+    from .mechanics import MechanicsManager
+    game.mechanics_manager = MechanicsManager.from_dict(saved_game_data.get("mechanics_state"))
+    if "mechanics_state" not in saved_game_data:
+        # Pre-mechanics save: powers already eliminated stay eliminated.
+        game.mechanics_manager.exile.seed_processed(game)
 
     # --- Rebuild agents -------------------------------------------------------
     agents: Dict[str, "DiplomacyAgent"] = {}
@@ -357,7 +365,7 @@ async def initialize_new_game(
     logger.info("Initializing Diplomacy Agents for each power...")
 
     for power_name, model_id in game.power_model_map.items():
-        if not game.powers[power_name].is_eliminated():
+        if is_active(game, power_name):
             # Determine the prompts directory for this power
             if hasattr(args, "prompts_dir_map") and args.prompts_dir_map:
                 prompts_dir_for_power = args.prompts_dir_map.get(power_name, args.prompts_dir)

@@ -4,6 +4,7 @@ from typing import Dict
 
 from .game_history import GameHistory
 from .agent import DiplomacyAgent
+from .exile import is_active
 from .utils import gather_possible_orders
 
 logger = logging.getLogger(__name__)
@@ -20,8 +21,8 @@ async def planning_phase(
     Lets each power generate a strategic plan using their DiplomacyAgent.
     """
     logger.info(f"Starting planning phase for {game.current_short_phase}...")
-    active_powers = [p_name for p_name, p_obj in game.powers.items() if not p_obj.is_eliminated()]
-    eliminated_powers = [p_name for p_name, p_obj in game.powers.items() if p_obj.is_eliminated()]
+    active_powers = [p_name for p_name, p_obj in game.powers.items() if is_active(game, p_name)]
+    eliminated_powers = [p_name for p_name, p_obj in game.powers.items() if not is_active(game, p_name)]
 
     logger.info(f"Active powers for planning: {active_powers}")
     if eliminated_powers:

@@ -225,6 +225,7 @@ async def get_valid_orders(
         phase=phase,
     )
     card_play = getattr(client, "_last_card_play", None)
+    bonus_move = getattr(client, "_last_bonus_move", None)
 
     invalid_info: list[str] = []
     valid: list[str] = []
@@ -234,7 +235,7 @@ async def get_valid_orders(
     if not isinstance(raw_orders, list):
         logger.warning("[%s] Orders received from LLM are not a list: %s. Using fallback.", power_name, raw_orders)
         model_error_stats[client.model_name]["order_decoding_errors"] += 1
-        return {"valid": client.fallback_orders(possible_orders), "invalid": [], "card": card_play}
+        return {"valid": client.fallback_orders(possible_orders), "invalid": [], "card": card_play, "bonus_move": bonus_move}
 
     # ── 3. Round-trip validation with engine ───────────────────
     CODE_TO_ENGINE = {"GBR": "BRITAIN", "FRA": "FRANCE", "GER": "GERMANY", "ITA": "ITALY", "POL": "POLAND", "SOV": "SOVIET", "ESP": "SPAIN", "USA": "USA"}
@@ -283,7 +284,7 @@ async def get_valid_orders(
         invalid.extend(card_forbidden)
     except (ImportError, AttributeError):
         pass
-    return {"valid": allowed_valid, "invalid": invalid, "card": card_play}
+    return {"valid": allowed_valid, "invalid": invalid, "card": card_play, "bonus_move": bonus_move}
 
 
 def normalize_and_compare_orders(
@@ -706,8 +707,7 @@ def get_board_state(board_state: dict, game: Game) -> Tuple[str, str]:
         units_str   = ", ".join(units)
         units_count = len(units)
         line = f"  {p}: {units_count} unit{'s' if units_count != 1 else ''} – {units_str}"
-        if game.powers[p].is_eliminated():
-            line += " [ELIMINATED]"
+        line += _power_status_tag(game, p)
         units_lines.append(line)
     units_repr = "\n".join(units_lines)
 
@@ -717,9 +717,22 @@ def get_board_state(board_state: dict, game: Game) -> Tuple[str, str]:
         centers_str   = ", ".join(centers)
         centers_count = len(centers)
         line = f"  {p}: {centers_count} supply center{'s' if centers_count != 1 else ''} – {centers_str}"
-        if game.powers[p].is_eliminated():
-            line += " [ELIMINATED]"
+        line += _power_status_tag(game, p)
         centers_lines.append(line)
     centers_repr = "\n".join(centers_lines)
 
     return (units_repr, centers_repr)
+
+
+def _power_status_tag(game: Game, power_name: str) -> str:
+    """[ELIMINATED] / [EXILE] / [SEEKING ASYLUM] suffix for board listings."""
+    if not game.powers[power_name].is_eliminated():
+        return ""
+    manager = getattr(game, "mechanics_manager", None)
+    if manager is not None:
+        registry = manager.exile
+        if power_name in registry.exiled:
+            return f" [EXILE, hosted by {registry.exiled[power_name].get('host')}]"
+        if power_name in registry.seeking:
+            return " [SEEKING ASYLUM]"
+    return " [ELIMINATED]"

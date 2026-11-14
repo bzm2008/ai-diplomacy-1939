@@ -16,6 +16,7 @@ from .clients import BaseModelClient
 # Import load_prompt and the new logging wrapper from utils
 from .utils import load_prompt, run_llm_and_log, log_llm_response, log_llm_response_async, get_prompt_path, get_board_state
 from .prompt_constructor import build_context_prompt  # Added import
+from .exile import get_exile_registry
 from .clients import GameHistory
 from diplomacy import Game
 from .formatter import format_with_gemini_flash, FORMAT_ORDER_DIARY, FORMAT_NEGOTIATION_DIARY, FORMAT_STATE_UPDATE
@@ -570,6 +571,12 @@ class DiplomacyAgent:
 
             logger.debug(f"[{self.power_name}] Negotiation diary prompt:\n{full_prompt[:500]}...")
 
+            # Exile JSON hints, only when this power has exile decisions to make.
+            try:
+                full_prompt += get_exile_registry(game).diary_instructions(game, self.power_name)
+            except Exception as exc:
+                logger.debug(f"[{self.power_name}] Exile diary hints skipped: {exc}")
+
             raw_response = await run_llm_and_log(
                 client=self.client,
                 prompt=full_prompt,
@@ -665,6 +672,12 @@ class DiplomacyAgent:
                 # update goals
                 if "goals" in parsed_data:
                     self.update_goals(parsed_data["goals"])
+
+                # Exile decisions (optional, tolerant: malformed fields ignored).
+                try:
+                    get_exile_registry(game).record_fields(game, self.power_name, parsed_data)
+                except Exception as exc:
+                    logger.warning(f"[{self.power_name}] Exile diary fields skipped: {exc}")
 
             # Add the generated (or fallback) diary entry
             self.add_diary_entry(diary_entry_text, game.current_short_phase)
@@ -1011,6 +1024,11 @@ class DiplomacyAgent:
                 phase_summary=last_phase_summary,  # Use provided phase_summary
                 other_powers=str(other_powers),  # Pass as string representation
             )
+            # Exile JSON hints, only when this power has exile decisions to make.
+            try:
+                prompt += get_exile_registry(game).diary_instructions(game, power_name)
+            except Exception as exc:
+                logger.debug(f"[{power_name}] Exile state-update hints skipped: {exc}")
             logger.debug(f"[{power_name}] State update prompt:\n{prompt}")
 
             # Use the client's raw generation capability - AWAIT the async call USING THE WRAPPER
@@ -1088,6 +1106,14 @@ class DiplomacyAgent:
                 raw_response=response if response is not None else "",  # Handle if response is None
                 success=log_entry_success,
             )
+
+            # Exile decisions (optional, tolerant: malformed fields ignored).
+            # Parsed before the fallback below so a response carrying only
+            # exile fields is not discarded; no-press games rely on this path.
+            try:
+                get_exile_registry(game).record_fields(game, power_name, update_data)
+            except Exception as exc:
+                logger.warning(f"[{power_name}] Exile state-update fields skipped: {exc}")
 
             # Fallback logic if update_data is still None or not usable
             if not update_data or not (

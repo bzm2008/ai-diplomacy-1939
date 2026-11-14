@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Any  # Added Any for game type placehol
 
 from config import config
 from .utils import load_prompt, get_prompt_path, get_board_state, us_isolation_active
+from .exile import is_active
+from .mechanics import mechanics_context_for_power
 from .possible_order_context import (
     generate_rich_order_context,
     generate_rich_order_context_xml,
@@ -103,9 +105,9 @@ def build_context_prompt(
     else:
         messages_this_round_text = "\n"
 
-    # Separate active and eliminated powers for clarity
-    active_powers = [p for p in game.powers.keys() if not game.powers[p].is_eliminated()]
-    eliminated_powers = [p for p in game.powers.keys() if game.powers[p].is_eliminated()]
+    # Separate active and eliminated powers for clarity (exiles stay active)
+    active_powers = [p for p in game.powers.keys() if is_active(game, p)]
+    eliminated_powers = [p for p in game.powers.keys() if not is_active(game, p)]
 
     units_repr, centers_repr = get_board_state(board_state, game)
 
@@ -167,6 +169,14 @@ def build_context_prompt(
         context = (news_prefix + f"# 美国孤立主义\n在 {until} 年之前，你的部队不能进攻欧洲国家的单位或补给中心，只能移动到空的海域、空地和中立补给中心（如 ICE、AZO），可以驻守、支援驻守，也可以自由谈判。可选指令列表已按此过滤。若有国家打到你的本土，限制立即解除。\n\n" + context)
     else:
         context = news_prefix + context
+
+    # 1939 mechanics: event notice (visibility-scoped), Britain's brief,
+    # exile status. Short blocks; never shown to powers that must not know.
+    mechanics_text = mechanics_context_for_power(
+        game, game_history, power_name, agent_relationships, year_phase
+    )
+    if mechanics_text:
+        context = mechanics_text + "\n\n" + context
 
     return context
 
