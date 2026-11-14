@@ -508,7 +508,7 @@ class BaseModelClient:
     ) -> str:
         instructions = load_prompt("planning_instructions.txt", prompts_dir=self.prompts_dir)
 
-        context = self.build_context_prompt(
+        context = build_context_prompt(
             game,
             board_state,
             power_name,
@@ -810,7 +810,7 @@ class BaseModelClient:
         # For simplicity, let's pass empty if not strictly needed by context for planning.
         possible_orders_for_context = {}  # game.get_all_possible_orders() if needed by context
 
-        context_prompt = self.build_context_prompt(
+        context_prompt = build_context_prompt(
             game,
             board_state,
             power_name,
