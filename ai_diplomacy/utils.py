@@ -226,6 +226,7 @@ async def get_valid_orders(
     )
     card_play = getattr(client, "_last_card_play", None)
     bonus_move = getattr(client, "_last_bonus_move", None)
+    puppet_orders = getattr(client, "_last_puppet_orders", None)
 
     invalid_info: list[str] = []
     valid: list[str] = []
@@ -235,7 +236,7 @@ async def get_valid_orders(
     if not isinstance(raw_orders, list):
         logger.warning("[%s] Orders received from LLM are not a list: %s. Using fallback.", power_name, raw_orders)
         model_error_stats[client.model_name]["order_decoding_errors"] += 1
-        return {"valid": client.fallback_orders(possible_orders), "invalid": [], "card": card_play, "bonus_move": bonus_move}
+        return {"valid": client.fallback_orders(possible_orders), "invalid": [], "card": card_play, "bonus_move": bonus_move, "puppet_orders": puppet_orders}
 
     # ── 3. Round-trip validation with engine ───────────────────
     CODE_TO_ENGINE = {"GBR": "BRITAIN", "FRA": "FRANCE", "GER": "GERMANY", "ITA": "ITALY", "POL": "POLAND", "SOV": "SOVIET", "ESP": "SPAIN", "USA": "USA"}
@@ -284,7 +285,7 @@ async def get_valid_orders(
         invalid.extend(card_forbidden)
     except (ImportError, AttributeError):
         pass
-    return {"valid": allowed_valid, "invalid": invalid, "card": card_play, "bonus_move": bonus_move}
+    return {"valid": allowed_valid, "invalid": invalid, "card": card_play, "bonus_move": bonus_move, "puppet_orders": puppet_orders}
 
 
 def normalize_and_compare_orders(

@@ -39,10 +39,13 @@ from ai_diplomacy.cards import (
 )
 from ai_diplomacy.exile import is_active
 from ai_diplomacy.mechanics import (
+    detect_attacks,
     get_mechanics_manager,
+    home_centers_of,
     is_adjustment_phase,
     is_spring_phase,
     passives_enabled,
+    unit_loc,
 )
 from ai_diplomacy.passives import apply_bonus_move, filter_mechanics_orders
 from ai_diplomacy.clients import load_model_client
@@ -119,10 +122,50 @@ def _str2bool(v: str) -> bool:
         return False
     raise argparse.ArgumentTypeError(f"Boolean value expected, got '{v}'")
 
+def _bank_unused_builds(game, mechanics, allowance, raw_orders, snapshot, phase) -> None:
+    """Bank unused peace-winter builds as reserve tokens (1937-1938).
+
+    ``allowance`` is the pre-resolution build balance per power (engine hook
+    result); ``raw_orders`` are the accepted winter orders; ``snapshot`` is
+    the pre-resolution board (centers + unit locations).
+    """
+    if not allowance:
+        return
+    occupied_before: set = set()
+    for snap in snapshot.values():
+        occupied_before |= set(snap.get("unit_locs", set()))
+    for power, allowed in allowance.items():
+        if allowed <= 0:
+            continue
+        submitted = raw_orders.get(power, [])
+        builds = sum(1 for o in submitted if str(o).strip().upper().endswith(" B"))
+        unused = allowed - builds
+        if unused <= 0:
+            continue
+        homes = home_centers_of(game, power)
+        owned_before = snapshot.get(power, {}).get("centers", set())
+        free = sum(1 for h in homes if h in owned_before and h not in occupied_before)
+        if free <= 0:
+            continue
+        mechanics.peace.reserves.bank_unused(power, unused, free, phase)
+
+
 def _detect_victory(game: Game, threshold: int | None = None) -> bool:
-    """True iff any power already owns ≥ `threshold` supply centres."""
+    """True iff any MAJOR power already owns ≥ `threshold` supply centres.
+
+    Minors and breakaway reserves never win, even if they somehow reached
+    the line (the engine's own win check has the same practical effect).
+    """
     threshold = threshold or game.win or 18
-    return any(len(p.centers) >= threshold for p in game.powers.values())
+    try:
+        from ai_diplomacy.mechanics import MAJOR_POWERS
+    except Exception:
+        MAJOR_POWERS = None
+    return any(
+        len(p.centers) >= threshold
+        and (MAJOR_POWERS is None or name in MAJOR_POWERS)
+        for name, p in game.powers.items()
+    )
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
@@ -398,10 +441,12 @@ async def main():
     get_mechanics_manager(game)
 
     if _detect_victory(game):
-        game.is_game_done = True          # short-circuit the main loop
+        # is_game_done is a read-only property (phase == 'COMPLETED'); a
+        # loaded save with a winner is already finished by the engine, so
+        # just log it — the while loop below checks the property.
         logger.info(
-            "Game already complete on load – a power has ≥18 centres "
-            f"(current phase {game.get_current_phase()})."
+            "Game already complete on load – a major power has reached "
+            f"the win threshold (current phase {game.get_current_phase()})."
         )
 
     # --- 4. Main Game Loop ---
@@ -433,6 +478,7 @@ async def main():
                 mechanics.events.draw_event(game, game_history, current_phase)
         if is_adjustment_phase(current_phase):
             mechanics.exile.begin_winter(game, current_phase)
+            mechanics.peace.reserves.begin_winter(current_phase)
         for agent in agents.values():
             if agent.card_model_phases_remaining > 0:
                 agent.card_model_phases_remaining -= 1
@@ -468,6 +514,9 @@ async def main():
                         raise RuntimeError(f"Strict model pause during diary generation: {failures[0]}") from failures[0]
             # Exile decisions recorded in the diaries take effect before orders.
             get_mechanics_manager(game).exile.resolve_pending(game, current_phase)
+            # 1937 systems: treaty/claim/parade intents and puppet requests.
+            get_mechanics_manager(game).peace.resolve_pending(game, current_phase)
+            get_mechanics_manager(game).puppets.resolve_pending(game, current_phase)
 
         # --- 4c. Parallel Order Generation and Diary Consolidation ---
         # Start diary consolidation in parallel with order generation
@@ -525,6 +574,7 @@ async def main():
             p_name = order_power_names[i]
             card_play = None
             bonus_move = None
+            puppet_orders = None
 
             if isinstance(result, Exception):
                 logger.error("Error getting orders for %s: %s", p_name, result, exc_info=result)
@@ -534,6 +584,7 @@ async def main():
                 invalid = result.get("invalid", [])
                 card_play = result.get("card")
                 bonus_move = result.get("bonus_move")
+                puppet_orders = result.get("puppet_orders")
 
             if card_play is not None and current_short_phase.endswith("M"):
                 accepted, card_error = card_manager.validate_play(p_name, card_play, current_phase, game=game)
@@ -572,6 +623,13 @@ async def main():
             # Germany's bonus move (passive) is applied after resolution.
             if bonus_move:
                 bonus_moves_by_power[p_name] = bonus_move
+            if puppet_orders and current_short_phase.endswith("M"):
+                try:
+                    get_mechanics_manager(game).puppets.record_directives(
+                        game, p_name, puppet_orders, current_phase
+                    )
+                except Exception as exc:
+                    logger.warning("[傀儡] %s 的傀儡指令记录失败：%s", p_name, exc)
 
             # what we record for prompt/history purposes
             submitted_orders_this_phase[p_name] = valid + invalid
@@ -599,6 +657,28 @@ async def main():
         for p_name, valid in raw_orders_by_power.items():
             game.set_orders(p_name, valid)
 
+        # --- 4c2. Pre-resolution snapshot for the 1937 systems ---
+        # Satisfaction scoring, grievances and reserve banking all compare
+        # the pre-resolution board with the post-resolution one.
+        _pre_snapshot: dict = {}
+        _centers_before: dict = {}
+        _units_before: dict = {}
+        for _pname, _power in game.powers.items():
+            _locs = {unit_loc(u) for u in _power.units}
+            _centers = {str(c).upper()[:3] for c in _power.centers}
+            _pre_snapshot[_pname] = {"centers": _centers, "units": len(_power.units), "unit_locs": _locs}
+            for _c in _centers:
+                _centers_before[_c] = _pname
+            for _loc in _locs:
+                _units_before[_loc] = _pname
+        _winter_allowance: dict = {}
+        if is_adjustment_phase(current_phase):
+            _mech = get_mechanics_manager(game)
+            for _pname, _power in game.powers.items():
+                _winter_allowance[_pname] = _mech.adjust_build_balance(
+                    game, _pname, len(_power.centers) - len(_power.units)
+                )
+
         # --- 4d. Process Phase ---
         completed_phase = current_phase
         game.process()
@@ -625,6 +705,55 @@ async def main():
             registry.end_movement_phase(game, completed_phase)
         if is_adjustment_phase(current_phase):
             registry.complete_winter(game, completed_phase)
+
+        # --- 4d3. 1937 systems post-resolution effects ---
+        mechanics.last_completed_phase = completed_phase
+        try:
+            _attacks = detect_attacks(raw_orders_by_power, _centers_before, _units_before)
+        except Exception as exc:
+            logger.warning("[机制] 攻击检测失败：%s", exc)
+            _attacks = []
+        try:
+            mechanics.ungarrison_occupied(game)
+        except Exception as exc:
+            logger.warning("[机制] 驻军更新失败：%s", exc)
+        if current_short_phase.endswith("M"):
+            try:
+                mechanics.peace.grievances.check_claim_intrusions(
+                    game, completed_phase, mechanics.peace.claims
+                )
+                mechanics.peace.grievances.check_puppet_attacks(
+                    _centers_before, game, completed_phase, mechanics.puppets
+                )
+                mechanics.peace.treaties.check_betrayals(
+                    _attacks, completed_phase, mechanics.satisfaction
+                )
+                mechanics.peace.treaties.check_joint_attacks(_attacks, completed_phase)
+                mechanics.peace.grievances.evaluate(
+                    _attacks, completed_phase, mechanics.satisfaction
+                )
+                mechanics.puppets.check_overlords_down(game, completed_phase)
+                mechanics.puppets.check_puppet_losses(game, completed_phase)
+            except Exception as exc:
+                logger.warning("[机制] 和平/傀儡结算失败：%s", exc)
+            try:
+                from ai_diplomacy.judge import get_director as _get_judge
+
+                mechanics.satisfaction.score_phase(
+                    game, completed_phase, _pre_snapshot, _attacks,
+                    mechanics, _get_judge(), mechanics.rng,
+                )
+            except Exception as exc:
+                logger.warning("[机制] 满意度评分失败：%s", exc)
+        if is_adjustment_phase(current_phase):
+            try:
+                _bank_unused_builds(
+                    game, mechanics, _winter_allowance, raw_orders_by_power,
+                    _pre_snapshot, completed_phase,
+                )
+                mechanics.peace.reserves.complete_winter()
+            except Exception as exc:
+                logger.warning("[机制] 预备役结算失败：%s", exc)
 
         # --- 4e. Post-Processing and State Updates ---
         phase_history_from_game = game.get_phase_history()
@@ -671,6 +800,8 @@ async def main():
                 await asyncio.gather(*state_update_tasks, return_exceptions=True)
             # No-press mode: exile intents come from state updates instead.
             get_mechanics_manager(game).exile.resolve_pending(game, current_phase)
+            get_mechanics_manager(game).peace.resolve_pending(game, current_phase)
+            get_mechanics_manager(game).puppets.resolve_pending(game, current_phase)
 
         # --- 4f. Save State At End of Phase ---
         await save_game_state(game, agents, game_history, game_file_path, run_config, completed_phase)

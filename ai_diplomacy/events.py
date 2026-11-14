@@ -1,10 +1,13 @@
-"""Random events (1939): seeded 8-card deck, Laya-directed targeting/timing,
+"""Random events (1937): seeded 8-card deck, judge-directed targeting/timing,
 visibility-scoped announcement, hard-effect enforcement via order filters.
 
-One card is drawn each Spring movement phase. The drawn card is shown to the
-event director (Laya) first; Laya picks the target and the timing
-(this phase / next movement phase) from hard-constrained option sets, and any
-unavailable/low-confidence/out-of-set answer falls back to the seeded RNG.
+One card is drawn each Spring movement phase. Each card fires at most once
+per game: the deck is never reshuffled, so if it runs out, later years
+simply have no event. The drawn card is shown to the
+event director (the LLM judge, see judge.py) first; the judge picks the
+target and the timing (this phase / next movement phase) from
+hard-constrained option sets, and any unavailable/low-confidence/out-of-set
+answer falls back to the seeded RNG.
 Effects are enforced by code (order filters, build balance, board mutation),
 never by prompt obedience alone.
 """
@@ -18,7 +21,7 @@ import random
 from pathlib import Path
 from typing import Any, Optional
 
-from . import laya_director
+from . import judge as judge_director
 from .exile import is_normal_active
 from .mechanics import (
     add_unit,
@@ -104,9 +107,16 @@ def format_event_text(record: dict) -> str:
         "content": (record.get("leak") or {}).get("content", ""),
     }
     try:
-        return template.format(**values)
+        text = template.format(**values)
     except (KeyError, IndexError):
-        return template
+        text = template
+    revealed = record.get("treaty_revealed")
+    if isinstance(revealed, dict):
+        text += (
+            f"\n【密约曝光】{revealed.get('a', '')} 与 {revealed.get('b', '')} "
+            "之间的一份秘密协定被曝光。"
+        )
+    return text
 
 
 def _default_seed() -> int:
@@ -140,10 +150,10 @@ class EventManager:
                 self._rng.setstate((int(rng_state[0]), tuple(int(x) for x in rng_state[1]), rng_state[2]))
             except (TypeError, ValueError, IndexError):
                 self._rng = random.Random(self.seed)
-        if not self.deck:
-            self._reshuffle()
         # Keep only known cards in a restored deck.
         self.deck = [card for card in self.deck if card in EVENT_IDS]
+        # Fresh game only: build the initial deck. A restored game whose
+        # deck is legitimately empty (all cards drawn) must NOT reshuffle.
         if not self.deck and not self.drawn:
             self._reshuffle()
 
@@ -170,9 +180,11 @@ class EventManager:
 
     # -- deck -------------------------------------------------------------
 
-    def draw_card_id(self) -> str:
+    def draw_card_id(self) -> Optional[str]:
+        # No reshuffle: each card fires at most once per game. An empty
+        # deck means the year's draw is skipped (see draw_event).
         if not self.deck:
-            self._reshuffle()
+            return None
         return self.deck.pop(0)
 
     # -- phase lifecycle --------------------------------------------------
@@ -223,6 +235,9 @@ class EventManager:
         rng = rng or self._rng
         year = phase_year(phase)
         card_id = self.draw_card_id()
+        if card_id is None:
+            logger.info("[事件] 牌堆已抽空，本年度无事件。")
+            return None
         record: dict = {
             "card_id": card_id,
             "year": year,
@@ -235,13 +250,13 @@ class EventManager:
             "fizzled": False,
             "leak": None,
         }
-        director = laya_director.get_director()
+        director = judge_director.get_director()
         prev_targets = [
             (item.get("targets") or [item.get("zone") or "?"])[0]
             for item in self.drawn[-3:]
             if item.get("targets") or item.get("zone")
         ]
-        summary = laya_director.build_state_summary(game, game_history, card_id, prev_targets)
+        summary = judge_director.build_state_summary(game, game_history, card_id, prev_targets)
 
         if card_id == "leak":
             self._resolve_leak(game, game_history, phase, record, director, summary, rng)
@@ -287,10 +302,15 @@ class EventManager:
     # -- per-card resolution ----------------------------------------------
 
     def _eligible_targets(self, game: Any, exclude_spain: bool = True) -> list[str]:
+        # Events target major powers only; minors/reserves are never hit.
+        from .mechanics import MAJOR_POWERS
+
         targets = [
             name
             for name in game.powers
-            if is_normal_active(game, name) and not (exclude_spain and name == "SPAIN")
+            if name in MAJOR_POWERS
+            and is_normal_active(game, name)
+            and not (exclude_spain and name == "SPAIN")
         ]
         return sorted(targets)
 
@@ -365,8 +385,12 @@ class EventManager:
         record["source"] = "fixed"
 
     def _resolve_reserves(self, game, record, rng) -> None:
+        from .mechanics import MAJOR_POWERS
+
         candidates = []
         for name in sorted(game.powers):
+            if name not in MAJOR_POWERS or not is_normal_active(game, name):
+                continue
             power = game.powers[name]
             if len(power.units) >= len(power.centers):
                 continue
@@ -407,8 +431,15 @@ class EventManager:
 
     def _resolve_leak(self, game, game_history, phase, record, director, summary, rng) -> None:
         messages = _previous_private_messages(game_history, phase)
-        # Spain's letters are never leaked; exiles' letters stay in the pool.
-        pool = [m for m in messages if str(m.get("sender", "")).upper() != "SPAIN"]
+        # Only majors' letters can leak; Spain's never do; exiles' stay in.
+        from .mechanics import MAJOR_POWERS
+
+        pool = [
+            m
+            for m in messages
+            if str(m.get("sender", "")).upper() in MAJOR_POWERS
+            and str(m.get("sender", "")).upper() != "SPAIN"
+        ]
         if not pool:
             record["fizzled"] = True
             return
@@ -429,6 +460,18 @@ class EventManager:
             "recipient": picked["recipient"],
             "content": picked["content"],
         }
+        # A leak may also expose one secret treaty (1937 design).
+        try:
+            manager = getattr(game, "mechanics_manager", None)
+            if manager is not None:
+                revealed = manager.peace.treaties.reveal_one_secret(phase, rng)
+                if revealed is not None:
+                    record["treaty_revealed"] = {
+                        "a": revealed.get("a"),
+                        "b": revealed.get("b"),
+                    }
+        except Exception as exc:
+            logger.warning("[事件] 密约曝光失败：%s", exc)
 
     # -- visibility --------------------------------------------------------
 

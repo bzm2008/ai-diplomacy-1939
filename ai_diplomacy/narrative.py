@@ -120,7 +120,7 @@ def _default_phase_summary_callback(self: Game, phase_key: str) -> Callable:
         # 2) Build text lines for the top "Board State Overview"
         top_lines = ["Current Board State (Ordered by SC Count):"]
         for p_name, sc_count, units, centers in power_info:
-            top_lines.append(f" • {p_name}: {sc_count} centers (needs 18 to win). Units={units} Centers={centers}")
+            top_lines.append(f" • {p_name}: {sc_count} centers (needs {self.win} to win). Units={units} Centers={centers}")
 
         # 3) Map orders to "successful", "failed", or "other" outcomes
         success_dict = {}
@@ -175,6 +175,41 @@ def _default_phase_summary_callback(self: Game, phase_key: str) -> Callable:
         # Only include "Other" section if it has content
         if other_dict:
             summary_parts.append("\n" + other_section)
+
+        # 1937 systems: domestic-mood symptoms, last phase's announcements,
+        # and active card effects in plain language (for the 战报).
+        # One-phase lag is inherent: scoring runs after resolution, while
+        # this summary is generated inside process().
+        try:
+            manager = getattr(self, "mechanics_manager", None)
+            if manager is not None:
+                symptoms = manager.satisfaction.latest_symptoms_text()
+                if symptoms:
+                    summary_parts.append("\n" + symptoms)
+                last = getattr(manager, "last_completed_phase", "")
+                if last:
+                    for registry in (
+                        manager.satisfaction,
+                        manager.peace.treaties,
+                        manager.peace.grievances,
+                        manager.peace.parades,
+                        manager.puppets,
+                    ):
+                        for text in getattr(registry, "announcements", {}).get(last, []):
+                            summary_parts.append("\n" + text)
+            card_manager = getattr(self, "card_manager", None)
+            if card_manager is not None and getattr(card_manager, "active", None):
+                from .cards import CARD_EFFECTS
+
+                card_lines = ["Cards in play:"]
+                for effect in card_manager.active.values():
+                    cid = str(effect.get("card_id", ""))
+                    card_lines.append(
+                        f"  {effect.get('power')}: {cid} — {CARD_EFFECTS.get(cid, '')}"
+                    )
+                summary_parts.append("\n" + "\n".join(card_lines))
+        except Exception as exc:
+            LOGGER.debug("Mechanics summary sections skipped: %s", exc)
 
         return f"Phase {current_short_phase} Summary:\n\n" + "\n".join(summary_parts)
 

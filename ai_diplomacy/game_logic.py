@@ -263,7 +263,7 @@ def load_game_state(
         for power_name, agent_data in last_phase_data["state_agents"].items():
             override_id = power_model_map.get(power_name)
             prompts_dir_from_config = (
-                run_config.prompts_dir_map.get(power_name)
+                run_config.prompts_dir_map.get(power_name, run_config.prompts_dir)
                 if getattr(run_config, "prompts_dir_map", None)
                 else run_config.prompts_dir
             )

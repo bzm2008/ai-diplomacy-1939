@@ -1,6 +1,6 @@
 # 生成 1939 版提示词目录 ai_diplomacy/prompts_1939/，并（可选）当场抽签分配模型 → 国家
 # 用法：
-#   python3 -I make_prompts.py --draw deepseek,gpt,claude,glm,kimi,grok,qwen,gemini --seed 1939
+#   python3 -I make_prompts.py --draw deepseek,gpt,claude,glm,kimi,grok,doubao,gemini --seed 1939
 #   python3 -I make_prompts.py --cast cast_draw.json        # 用已有抽签结果重新生成
 #   python3 -I make_prompts.py --cast cast_manual.json      # 用手动指定的分配（正式局用这个）
 import argparse

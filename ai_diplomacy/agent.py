@@ -24,8 +24,35 @@ from .formatter import format_with_gemini_flash, FORMAT_ORDER_DIARY, FORMAT_NEGO
 logger = logging.getLogger(__name__)
 
 # == Best Practice: Define constants at module level ==
-ALL_POWERS = frozenset({"BRITAIN", "FRANCE", "GERMANY", "ITALY", "POLAND", "SOVIET", "SPAIN", "USA"})
+ALL_POWERS = frozenset({"BRITAIN", "FRANCE", "GERMANY", "ITALY", "POLAND", "SOVIET", "SPAIN", "USA", "PORTUGAL", "HOLLAND", "BELGIUM", "NORWAY", "DENMARK", "GREECE", "ROMANIA", "TURKEY", "SPLIT_A", "SPLIT_B", "SPLIT_C", "SPLIT_D"})
 ALLOWED_RELATIONSHIPS = ["Enemy", "Unfriendly", "Neutral", "Friendly", "Ally"]
+
+def _mechanics_diary_instructions(game, power_name: str) -> str:
+    """Diary JSON hints for the 1937 systems (treaties, claims, parades, puppets)."""
+    manager = getattr(game, "mechanics_manager", None)
+    if manager is None:
+        return ""
+    parts = []
+    try:
+        parts.append(manager.peace.diary_instructions(game, power_name))
+    except Exception:
+        pass
+    try:
+        parts.append(manager.puppets.diary_instructions(game, power_name))
+    except Exception:
+        pass
+    text = "\n\n".join(p for p in parts if p)
+    return "\n\n" + text if text else ""
+
+
+def _record_mechanics_fields(game, power_name: str, parsed_data) -> None:
+    """Record 1937-systems diary fields (tolerant: registries ignore bad input)."""
+    manager = getattr(game, "mechanics_manager", None)
+    if manager is None:
+        return
+    manager.peace.record_fields(game, power_name, parsed_data, manager)
+    manager.puppets.record_fields(game, power_name, parsed_data)
+
 
 class DiplomacyAgent:
     """
@@ -577,6 +604,12 @@ class DiplomacyAgent:
             except Exception as exc:
                 logger.debug(f"[{self.power_name}] Exile diary hints skipped: {exc}")
 
+            # 1937 mechanics JSON hints (treaties, claims, parades, puppets).
+            try:
+                full_prompt += _mechanics_diary_instructions(game, self.power_name)
+            except Exception as exc:
+                logger.debug(f"[{self.power_name}] Mechanics diary hints skipped: {exc}")
+
             raw_response = await run_llm_and_log(
                 client=self.client,
                 prompt=full_prompt,
@@ -678,6 +711,12 @@ class DiplomacyAgent:
                     get_exile_registry(game).record_fields(game, self.power_name, parsed_data)
                 except Exception as exc:
                     logger.warning(f"[{self.power_name}] Exile diary fields skipped: {exc}")
+
+                # 1937 mechanics fields (treaties, claims, parades, puppets).
+                try:
+                    _record_mechanics_fields(game, self.power_name, parsed_data)
+                except Exception as exc:
+                    logger.warning(f"[{self.power_name}] Mechanics diary fields skipped: {exc}")
 
             # Add the generated (or fallback) diary entry
             self.add_diary_entry(diary_entry_text, game.current_short_phase)
@@ -1029,6 +1068,12 @@ class DiplomacyAgent:
                 prompt += get_exile_registry(game).diary_instructions(game, power_name)
             except Exception as exc:
                 logger.debug(f"[{power_name}] Exile state-update hints skipped: {exc}")
+
+            # 1937 mechanics JSON hints (treaties, claims, parades, puppets).
+            try:
+                prompt += _mechanics_diary_instructions(game, power_name)
+            except Exception as exc:
+                logger.debug(f"[{power_name}] Mechanics state-update hints skipped: {exc}")
             logger.debug(f"[{power_name}] State update prompt:\n{prompt}")
 
             # Use the client's raw generation capability - AWAIT the async call USING THE WRAPPER
@@ -1114,6 +1159,12 @@ class DiplomacyAgent:
                 get_exile_registry(game).record_fields(game, power_name, update_data)
             except Exception as exc:
                 logger.warning(f"[{power_name}] Exile state-update fields skipped: {exc}")
+
+            # 1937 mechanics fields (treaties, claims, parades, puppets).
+            try:
+                _record_mechanics_fields(game, power_name, update_data)
+            except Exception as exc:
+                logger.warning(f"[{power_name}] Mechanics state-update fields skipped: {exc}")
 
             # Fallback logic if update_data is still None or not usable
             if not update_data or not (

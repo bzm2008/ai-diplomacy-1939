@@ -138,7 +138,7 @@ def test_card_context_describes_each_remaining_card_effect():
     assert "作废" in britain
     usa = card_context_for_power(manager, "USA", "S1939M")
     assert "GPT-6 Astra" in usa
-    assert "18个中心" in usa
+    assert "26个中心" in usa
     # Played cards leave the hand listing; declarations stay public.
     assert manager.validate_play("FRANCE", {"card": "fr_maginot", "reason": "守住", "target": "BRE PAR"}, "S1939M")[0]
     france = card_context_for_power(manager, "FRANCE", "F1939M")

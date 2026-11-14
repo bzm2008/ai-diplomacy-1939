@@ -178,6 +178,14 @@ def filter_mechanics_orders(
         _filter_passives(game, kept, _drop, phase)
     if events_enabled() and event_effect:
         _filter_event_orders(game, kept, _drop, event_effect)
+
+    # --- 1937 systems (no-ops when their switches are off) ---
+    manager = getattr(game, "mechanics_manager", None)
+    if manager is not None:
+        _apply_puppet_directives(game, kept, _drop, phase, manager)
+        _filter_peace_period(game, kept, _drop, phase)
+        _filter_garrisons(game, kept, _drop, phase, manager)
+        _filter_satisfaction_hold_only(game, kept, _drop, phase, manager)
     return kept, forbidden
 
 
@@ -262,6 +270,145 @@ def _filter_event_orders(game: Any, kept: dict[str, list[str]], drop, effect: di
             drop(target, order, "铁路罢工：陆军不能移动")
         elif card_id == "port_strike" and unit_type(order) == "F" and unit_loc(order) in centers:
             drop(target, order, "港口罢工：沿海补给中心的舰队不能移动")
+
+
+def _apply_puppet_directives(game: Any, kept: dict[str, list[str]], drop, phase: str, manager) -> None:
+    """Apply overlord directives issued in an EARLIER movement phase.
+
+    Each directive replaces the puppet's order for the unit at that
+    location. Invalid directives (no such unit, order not possible) are
+    dropped and the puppet's own order stands.
+    """
+    try:
+        from .mechanics import puppets_enabled
+    except Exception:
+        return
+    if not puppets_enabled():
+        return
+    directives = manager.puppets.consume_directives(game, phase)
+    if not directives:
+        return
+    # consume_directives returns {puppet: {location: order}} directly.
+    for puppet, orders in directives.items():
+        if not orders:
+            continue
+        try:
+            # get_all_possible_orders() is keyed by LOCATION, not by power.
+            possible = game.get_all_possible_orders()
+        except Exception:
+            possible = {}
+        current = kept.get(puppet, [])
+        for loc, directed in orders.items():
+            loc = str(loc).upper()[:3]
+            directed = str(directed)
+            idx = None
+            for i, order in enumerate(current):
+                if unit_loc(order) == loc:
+                    idx = i
+                    break
+            if directed not in possible.get(loc, []):
+                logger.info(
+                    "[傀儡] %s 的宗主国指令无效（%s：%s），保留傀儡原指令",
+                    puppet, loc, directed,
+                )
+                continue
+            if idx is not None:
+                current[idx] = directed
+            else:
+                current.append(directed)
+            logger.info("[傀儡] %s 的 %s 被宗主国指令覆盖：%s", puppet, loc, directed)
+
+
+def _filter_peace_period(game: Any, kept: dict[str, list[str]], drop, phase: str) -> None:
+    """Peace period (1937-1938): no attacks on foreign units or centers.
+
+    A move into a province owned by another power, or occupied by a
+    foreign unit, is dropped (unit holds). Supports and convoys are
+    unaffected; moves into empty unowned provinces are fine.
+    """
+    try:
+        from .mechanics import peace_systems_enabled
+    except Exception:
+        return
+    if not peace_systems_enabled():
+        return
+    year = phase_year(phase)
+    if year is None or year > 1938:
+        return
+    centers: dict[str, str] = {}
+    unit_owners: dict[str, str] = {}
+    for name, power in game.powers.items():
+        for center in power.centers:
+            centers[str(center).upper()[:3]] = name
+        for unit in power.units:
+            unit_owners[unit_loc(unit)] = name
+    for power_name, orders in list(kept.items()):
+        for order in list(orders):
+            if not is_move_order(order):
+                continue
+            dest = move_destination(order)
+            owner = centers.get(dest)
+            occupant = unit_owners.get(dest)
+            if (owner is not None and owner != power_name) or (
+                occupant is not None and occupant != power_name
+            ):
+                drop(power_name, order, "和平期：1937–1938 年不得进攻他国省份或部队")
+
+
+def _filter_garrisons(game: Any, kept: dict[str, list[str]], drop, phase: str, manager) -> None:
+    """Garrisoned minor home centers (1939+): unsupported attacks fail.
+
+    Only applies to games that actually have minor powers (the 1937 map).
+    The garrison is a filter, not a unit: it never blocks the owner's own
+    orders and never occupies a build slot.
+    """
+    try:
+        from .mechanics import MINOR_POWERS
+    except Exception:
+        return
+    if not any(name in MINOR_POWERS for name in game.powers):
+        return
+    year = phase_year(phase)
+    if year is None or year < 1939:
+        return
+    garrisoned = manager.garrisoned_provinces(game)
+    if not garrisoned:
+        return
+    centers: dict[str, str] = {}
+    for name, power in game.powers.items():
+        for center in power.centers:
+            centers[str(center).upper()[:3]] = name
+    supported = _supported_moves(kept)
+    for power_name, orders in list(kept.items()):
+        for order in list(orders):
+            if not is_move_order(order):
+                continue
+            dest = move_destination(order)
+            if dest not in garrisoned:
+                continue
+            owner = centers.get(dest)
+            if owner is None or owner == power_name:
+                continue
+            if (unit_loc(order), dest) in supported:
+                continue
+            drop(power_name, order, "驻军：进攻小国本土补给中心须有支援")
+
+
+def _filter_satisfaction_hold_only(game: Any, kept: dict[str, list[str]], drop, phase: str, manager) -> None:
+    """Satisfaction below 40: all units Hold/Support-only this phase."""
+    try:
+        from .mechanics import satisfaction_enabled
+    except Exception:
+        return
+    if not satisfaction_enabled():
+        return
+    state = manager.satisfaction
+    for power_name, orders in list(kept.items()):
+        if not state.hold_only(power_name):
+            continue
+        for order in list(orders):
+            if is_move_order(order) or is_convoy_order(order):
+                drop(power_name, order, "国内动荡：本阶段部队只能驻守或支援")
 
 
 # ---------------------------------------------------------------------------

@@ -71,6 +71,7 @@ async def conduct_negotiations(
 
     # We do up to 'max_rounds' single-message turns for each power
     for round_index in range(max_rounds):
+        minor_sent_counts: dict = {}
         logger.info(f"Negotiation Round {round_index + 1}/{max_rounds}")
 
         # Prepare tasks for asyncio.gather
@@ -85,7 +86,11 @@ async def conduct_negotiations(
             client = agent.client
 
             possible_orders = gather_possible_orders(game, power_name)
-            if not possible_orders and not _is_exile_participant(game, power_name):
+            if (
+                not possible_orders
+                and not _is_exile_participant(game, power_name)
+                and not game.powers[power_name].centers
+            ):
                 logger.info(f"No orderable locations for {power_name}; skipping message generation.")
                 continue
             board_state = game.get_state()
@@ -169,6 +174,32 @@ async def conduct_negotiations(
                     )
                     continue
 
+                # ── puppet routing: puppets only talk to their overlord ──
+                if recipient != GLOBAL and not _can_message(game, power_name, recipient):
+                    logger.info(
+                        f"Discarding private message from {power_name} to {recipient} "
+                        f"(傀儡只能与宗主国通信)."
+                    )
+                    continue
+
+                # ── minors cannot send GLOBAL broadcasts ──
+                if recipient == GLOBAL and not _can_send_global(power_name):
+                    logger.info(
+                        f"Discarding global message from {power_name} "
+                        f"(小国不能发全局广播)."
+                    )
+                    continue
+
+                # ── minors: at most 3 private messages per round ──
+                if recipient != GLOBAL and _is_minor_power(power_name):
+                    _key = (power_name, round_index)
+                    if minor_sent_counts.get(_key, 0) >= 3:
+                        logger.info(
+                            f"Discarding private message from {power_name} "
+                            f"(小国每轮最多 3 封私信)."
+                        )
+                        continue
+
                 # ── repetition guard for private messages ─────────────
                 if recipient != GLOBAL:
                     pair = (power_name, recipient)
@@ -185,6 +216,10 @@ async def conduct_negotiations(
                     # recipient has now been contacted; when they respond, we'll clear the flag for the reverse pair
                     awaiting_reply[(recipient, power_name)] = False
                 # ─────────────────────────────────────────────────────
+
+                if recipient != GLOBAL and _is_minor_power(power_name):
+                    _key = (power_name, round_index)
+                    minor_sent_counts[_key] = minor_sent_counts.get(_key, 0) + 1
 
                 diplo_message = Message(
                     phase=game.current_short_phase,
@@ -210,3 +245,33 @@ async def conduct_negotiations(
     logger.info("Negotiation phase complete.")
     return game_history
 
+
+
+# ---------------------------------------------------------------------------
+# 1937 systems: puppet routing + minor diplomacy limits
+# ---------------------------------------------------------------------------
+
+def _is_minor_power(power_name: str) -> bool:
+    """True for minor powers and breakaway reserves (never for majors or
+    powers of other maps, which are in neither list)."""
+    try:
+        from .mechanics import MINOR_POWERS, RESERVE_POWERS
+    except Exception:
+        return False
+    return power_name in MINOR_POWERS or power_name in RESERVE_POWERS
+
+
+def _can_send_global(power_name: str) -> bool:
+    """Minors and breakaway reserves cannot send GLOBAL broadcasts."""
+    return not _is_minor_power(power_name)
+
+
+def _can_message(game, sender: str, recipient: str) -> bool:
+    """Puppet routing rule; True when no puppet registry is attached."""
+    manager = getattr(game, "mechanics_manager", None)
+    if manager is None:
+        return True
+    try:
+        return manager.puppets.can_message(sender, recipient)
+    except Exception:
+        return True
