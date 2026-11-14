@@ -116,10 +116,16 @@ class BaseModelClient:
 
         try:
             strict_mode = os.environ.get("DIP_STRICT_MODEL_RESPONSES") == "1"
+            # Strict-mode retries re-prompt with feedback about what was wrong,
+            # instead of repeating the identical prompt and hoping for a
+            # different answer. attempt_prompt accumulates only new feedback.
+            attempt_prompt = prompt
+            reported_invalid: set = set()
+            format_reminder_sent = False
             while True:
                 raw_response = await run_llm_and_log(
                     client=self,
-                    prompt=prompt,
+                    prompt=attempt_prompt,
                     power_name=power_name,
                     phase=phase,
                     response_type="order",
@@ -144,6 +150,13 @@ class BaseModelClient:
                 if not move_list:
                     if strict_mode:
                         logger.warning("[%s] No orders parsed for %s; requesting a fresh response.", self.model_name, power_name)
+                        if not format_reminder_sent:
+                            attempt_prompt += (
+                                "\n\n【重试提示】上一次回复中未能解析出任何指令。"
+                                "请严格按 PARSABLE OUTPUT 的 JSON 格式返回 orders 列表，"
+                                "只从合法指令列表中选择。"
+                            )
+                            format_reminder_sent = True
                         await asyncio.sleep(2)
                         continue
                     logger.warning(f"[{self.model_name}] Could not extract moves for {power_name}. Using fallback.")
@@ -167,6 +180,15 @@ class BaseModelClient:
                         "[%s] Invalid orders for %s (%s); withholding phase and requesting a fresh response.",
                         self.model_name, power_name, invalid_moves_list,
                     )
+                    new_invalid = [m for m in invalid_moves_list if m not in reported_invalid]
+                    if new_invalid:
+                        reported_invalid.update(new_invalid)
+                        attempt_prompt += (
+                            "\n\n【重试提示】上一次返回中以下指令无效，请勿重复，"
+                            "并只从合法指令列表中选择："
+                            + "；".join(new_invalid)
+                            + "。其余有效指令可保留。"
+                        )
                     await asyncio.sleep(2)
                     continue
 
