@@ -6,6 +6,7 @@ from typing import Dict, TYPE_CHECKING
 from diplomacy.engine.message import Message, GLOBAL
 
 from .agent import DiplomacyAgent
+from .exile import is_active
 from .utils import gather_possible_orders, normalize_recipient_name
 
 if TYPE_CHECKING:
@@ -17,6 +18,23 @@ logger.setLevel(logging.INFO)
 logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
+
+
+def _is_exile_participant(game: "Game", power_name: str) -> bool:
+    """Seeking/exiled powers have no units but must keep negotiating."""
+    manager = getattr(game, "mechanics_manager", None)
+    if manager is None:
+        return False
+    registry = manager.exile
+    return power_name in registry.seeking or power_name in registry.exiled
+
+
+def _is_feuding_pair(game: "Game", sender: str, recipient: str) -> bool:
+    manager = getattr(game, "mechanics_manager", None)
+    if manager is None:
+        return False
+    pair = manager.events.feud_pair()
+    return pair is not None and {sender, recipient} == set(pair)
 
 
 async def conduct_negotiations(
@@ -37,8 +55,8 @@ async def conduct_negotiations(
     """
     logger.info("Starting negotiation phase.")
 
-    active_powers = [p_name for p_name, p_obj in game.powers.items() if not p_obj.is_eliminated()]
-    eliminated_powers = [p_name for p_name, p_obj in game.powers.items() if p_obj.is_eliminated()]
+    active_powers = [p_name for p_name, p_obj in game.powers.items() if is_active(game, p_name)]
+    eliminated_powers = [p_name for p_name, p_obj in game.powers.items() if not is_active(game, p_name)]
 
     logger.info(f"Active powers for negotiations: {active_powers}")
     if eliminated_powers:
@@ -67,7 +85,7 @@ async def conduct_negotiations(
             client = agent.client
 
             possible_orders = gather_possible_orders(game, power_name)
-            if not possible_orders:
+            if not possible_orders and not _is_exile_participant(game, power_name):
                 logger.info(f"No orderable locations for {power_name}; skipping message generation.")
                 continue
             board_state = game.get_state()
@@ -142,6 +160,14 @@ async def conduct_negotiations(
                         recipient = GLOBAL
                 else:
                     recipient = GLOBAL
+
+                # ── diplomatic incident: the feuding pair cannot write to each other ──
+                if recipient != GLOBAL and _is_feuding_pair(game, power_name, recipient):
+                    logger.info(
+                        f"Discarding private message from {power_name} to {recipient} "
+                        f"(外交风波：本阶段两国不能互相发私信)."
+                    )
+                    continue
 
                 # ── repetition guard for private messages ─────────────
                 if recipient != GLOBAL:

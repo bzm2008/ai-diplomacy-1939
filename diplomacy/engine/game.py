@@ -228,7 +228,7 @@ class Game(Jsonable):
                  'message_history', 'state_history', 'result_history', 'status', 'timestamp_created', 'n_controls',
                  'deadline', 'registration_password', 'observer_level', 'controlled_powers', '_phase_wrapper_type',
                  'phase_abbr', '_unit_owner_cache', 'daide_port', 'fixed_state', 'power_model_map', 'phase_summaries',
-                 'card_manager']
+                 'card_manager', 'mechanics_manager']
     zobrist_tables = {}
     rule_cache = ()
     model = {
@@ -301,6 +301,7 @@ class Game(Jsonable):
         self.power_model_map = {}
         self.phase_summaries = {}
         self.card_manager = None
+        self.mechanics_manager = None
         # Caches
         self._unit_owner_cache = None               # {(unit, coast_required): owner}
 
@@ -1012,10 +1013,7 @@ class Game(Jsonable):
 
             # Adjustment
             if current_phase_type == 'A':
-                build_count = len(power.centers) - len(power.units)
-                manager = getattr(self, 'card_manager', None)
-                if manager is not None and hasattr(manager, 'adjustment_balance'):
-                    build_count = manager.adjustment_balance(self, power.name)
+                build_count = self._adjustment_balance(power)
 
                 # Building - All unoccupied homes
                 if build_count > 0:
@@ -1761,7 +1759,7 @@ class Game(Jsonable):
                 unit_dict['*' + unit_loc] = (unit, True, retreat_list, False)
 
         # Building a list of build counts and build_sites
-        build_counts = {power_name: len(power.centers) - len(power.units) if self.phase_type == 'A' else 0
+        build_counts = {power_name: self._adjustment_balance(power) if self.phase_type == 'A' else 0
                         for power_name, power in self.powers.items()}
         build_sites = {power_name: self._build_sites(power) if self.phase_type == 'A' else []
                        for power_name, power in self.powers.items()}
@@ -2944,10 +2942,8 @@ class Game(Jsonable):
             # If we have units to remove or to build, we need to process
             for power in self.powers.values():
                 units, centers = len(power.units), len(power.centers)
-                manager = getattr(self, 'card_manager', None)
-                if manager is not None and hasattr(manager, 'adjustment_balance'):
-                    balance = manager.adjustment_balance(self, power.name)
-                    if balance != 0:
+                if getattr(self, 'card_manager', None) is not None or getattr(self, 'mechanics_manager', None) is not None:
+                    if self._adjustment_balance(power) != 0:
                         return 0
                 if [x for x in power.centers if x in power.homes]:
                     centers += (0 + min(0, len([0 for x in power.units if x[2:5] in power.homes])))
@@ -2967,6 +2963,25 @@ class Game(Jsonable):
         """ Deletes orders and removes CD flag after moves """
         for power in self.powers.values():
             power.orders, power.civil_disorder = {}, 0
+
+    def _adjustment_balance(self, power):
+        """ Combined adjustment balance (centers - units) for a power.
+
+            Starts from the raw count, then applies card modifiers
+            (``card_manager.adjustment_balance``) and 1939 mechanics
+            adjustments (``mechanics_manager.adjust_build_balance``:
+            exile disband exemption, USA arsenal bonus, famine build ban,
+            exile-funding build cost). Without either manager attached this
+            is exactly the raw count, preserving stock engine behaviour.
+        """
+        balance = len(power.centers) - len(power.units)
+        manager = getattr(self, 'card_manager', None)
+        if manager is not None and hasattr(manager, 'adjustment_balance'):
+            balance = manager.adjustment_balance(self, power.name)
+        mechanics = getattr(self, 'mechanics_manager', None)
+        if mechanics is not None and hasattr(mechanics, 'adjust_build_balance'):
+            balance = mechanics.adjust_build_balance(self, power.name, balance)
+        return balance
 
     def _build_sites(self, power):
         """ Returns a list of sites where power can build units
@@ -3423,9 +3438,7 @@ class Game(Jsonable):
         # Calculating if the power can build or remove units. Card build
         # modifiers affect only a positive build difference.
         adjust, places = [], []
-        base_need = len(power.centers) - len(power.units)
-        manager = getattr(self, 'card_manager', None)
-        need = manager.adjustment_balance(self, power.name) if manager is not None and hasattr(manager, 'adjustment_balance') else base_need
+        need = self._adjustment_balance(power)
         sites = []
         order_type = 'D' if need < 0 else 'B'
 
@@ -4365,10 +4378,7 @@ class Game(Jsonable):
 
             # CIVIL DISORDER
             for power in self.powers.values():
-                diff = len(power.units) - len(power.centers)
-                manager = getattr(self, 'card_manager', None)
-                if manager is not None and hasattr(manager, 'adjustment_balance'):
-                    diff = -manager.adjustment_balance(self, power.name)
+                diff = -self._adjustment_balance(power)
 
                 # Detecting missing orders
                 for order in power.adjust[:]:
@@ -4490,10 +4500,7 @@ class Game(Jsonable):
 
         # Processing Build and Disband
         for power in self.powers.values():
-            diff = len(power.units) - len(power.centers)
-            manager = getattr(self, 'card_manager', None)
-            if manager is not None and hasattr(manager, 'adjustment_balance'):
-                diff = -manager.adjustment_balance(self, power.name)
+            diff = -self._adjustment_balance(power)
 
             # For each order
             for order in power.adjust or []:

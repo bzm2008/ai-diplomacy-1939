@@ -112,6 +112,7 @@ class BaseModelClient:
         success_status = "Failure: Initialized"
         parsed_orders_for_return = self.fallback_orders(possible_orders)  # Default to fallback
         self._last_card_play = None
+        self._last_bonus_move = None
 
         try:
             strict_mode = os.environ.get("DIP_STRICT_MODEL_RESPONSES") == "1"
@@ -137,6 +138,8 @@ class BaseModelClient:
                 # Card plays are an optional side-channel in the same JSON object.
                 # They must never affect order parsing or strict order retries.
                 self._last_card_play = self._extract_card_play(formatted_response, power_name)
+                # Same side-channel pattern for Germany's bonus move (passive).
+                self._last_bonus_move = self._extract_bonus_move(formatted_response, power_name)
                 move_list = self._extract_moves(formatted_response, power_name)
                 if not move_list:
                     if strict_mode:
@@ -253,6 +256,35 @@ class BaseModelClient:
                 if isinstance(play, dict):
                     return play
                 logger.info("[%s] Ignoring malformed play_card for %s", self.model_name, power_name)
+                return None
+        return None
+
+    def _extract_bonus_move(self, raw_response: str, power_name: str = "") -> Optional[dict]:
+        """Extract optional ``bonus_move`` data (Germany passive) without
+        changing order parsing. Returns ``{"unit": ..., "target": ...}``."""
+        if not raw_response:
+            return None
+        candidates = []
+        for pattern in (
+            r"PARSABLE OUTPUT:\s*(\{[\s\S]*\})",
+            r"```(?:json)?\s*\n(\{[\s\S]*?\})\s*\n```",
+            r"(\{[\s\S]*\"orders\"\s*:\s*\[[\s\S]*?\][\s\S]*\})",
+        ):
+            match = re.search(pattern, raw_response, re.DOTALL)
+            if match:
+                candidates.append(match.group(1).strip())
+        for candidate in candidates:
+            for text in (candidate, re.sub(r",\s*([}\]])", r"\1", candidate), candidate.replace("'", '"')):
+                try:
+                    data = json.loads(text)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                move = data.get("bonus_move") if isinstance(data, dict) else None
+                if move is None:
+                    return None
+                if isinstance(move, dict) and isinstance(move.get("unit"), str) and isinstance(move.get("target"), str):
+                    return {"unit": move["unit"], "target": move["target"]}
+                logger.info("[%s] Ignoring malformed bonus_move for %s", self.model_name, power_name)
                 return None
         return None
 
@@ -476,7 +508,7 @@ class BaseModelClient:
     ) -> str:
         instructions = load_prompt("planning_instructions.txt", prompts_dir=self.prompts_dir)
 
-        context = self.build_context_prompt(
+        context = build_context_prompt(
             game,
             board_state,
             power_name,
@@ -778,7 +810,7 @@ class BaseModelClient:
         # For simplicity, let's pass empty if not strictly needed by context for planning.
         possible_orders_for_context = {}  # game.get_all_possible_orders() if needed by context
 
-        context_prompt = self.build_context_prompt(
+        context_prompt = build_context_prompt(
             game,
             board_state,
             power_name,
