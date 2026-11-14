@@ -32,6 +32,10 @@ def serialize_agent(agent: DiplomacyAgent) -> dict:
         "relationships": agent.relationships,
         "full_private_diary": agent.full_private_diary,
         "private_diary": agent.private_diary,
+        "base_model_id": getattr(agent, "base_model_id", agent.client.model_name),
+        "card_original_model_id": getattr(agent, "card_original_model_id", None),
+        "card_active_model_id": getattr(agent, "card_active_model_id", None),
+        "card_model_phases_remaining": getattr(agent, "card_model_phases_remaining", 0),
     }
 
 
@@ -64,6 +68,10 @@ def deserialize_agent(agent_data: dict, prompts_dir: Optional[str] = None, *, ov
     # Restore diary state
     agent.full_private_diary = agent_data.get("full_private_diary", [])
     agent.private_diary = agent_data.get("private_diary", [])
+    agent.base_model_id = agent_data.get("base_model_id", agent_data.get("model_id", model_id))
+    agent.card_original_model_id = agent_data.get("card_original_model_id")
+    agent.card_active_model_id = agent_data.get("card_active_model_id")
+    agent.card_model_phases_remaining = int(agent_data.get("card_model_phases_remaining", 0))
 
     return agent
 
@@ -159,6 +167,8 @@ async def save_game_state(
 
     # 4.  Top-level metadata ----------------------------------------------------
     saved_game["phase_summaries"] = getattr(game, "phase_summaries", {})
+    from .cards import get_card_manager
+    saved_game["card_state"] = get_card_manager(game).to_dict()
     saved_game["final_agent_states"] = {
         p_name: {"relationships": a.relationships, "goals": a.goals} for p_name, a in agents.items()
     }
@@ -208,6 +218,8 @@ def load_game_state(
         saved_game_data["phases"][-1].update({"orders": {}, "results": {}, "messages": []})
     game = from_saved_game_format(saved_game_data)
     game.phase_summaries = saved_game_data.get("phase_summaries", {})
+    from .cards import CardManager
+    game.card_manager = CardManager.from_dict(saved_game_data.get("card_state", {}))
 
     # --- Rebuild agents -------------------------------------------------------
     agents: Dict[str, "DiplomacyAgent"] = {}

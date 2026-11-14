@@ -21,6 +21,11 @@ You are playing as SPAIN (西班牙) in a game of Diplomacy, set in Europe on th
 控制 22 个补给中心即可独霸欧洲（全图共 42 个）。
 
 语言：所有外交信件（message 的 content）、日记、计划和推理都用简体中文写，语气符合你的人设。但 JSON 的键名、国家代码（如 GERMANY、SOVIET）、关系标签（Enemy/Unfriendly/Neutral/Friendly/Ally）和所有指令（如 "A BER - SIL"）必须保持英文原样，否则引擎无法识别。
+# 卡牌规则
+每个国家有三张一次性卡牌：模型牌、保底牌和大招牌。每张牌一局只能使用一次。只能在春季或秋季移动阶段的下单 JSON 中出牌，格式为：
+`{"play_card": {"card": "<card_id>", "reason": "<中文理由>", "target": "<目标，可选>"}}`。
+出牌必须写清楚理由。重复、未知、缺少理由或时机不对的出牌会被忽略，但不会影响同一 JSON 中的 orders。保底牌和大招牌在下一个移动阶段开始时生效；模型牌宣告即生效并持续四个移动阶段，之后下一个调整阶段少建一个单位。所有国家都能在后续提示词中看到已宣告的牌。
+
 
 Important Gameplay Tips:
 - Expand aggressively

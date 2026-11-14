@@ -57,6 +57,10 @@ class DiplomacyAgent:
 
         self.power_name: str = power_name
         self.client: BaseModelClient = client
+        self.base_model_id: str = client.model_name
+        self.card_original_model_id: Optional[str] = None
+        self.card_active_model_id: Optional[str] = None
+        self.card_model_phases_remaining: int = 0
         self.prompts_dir: Optional[str] = prompts_dir
         # Initialize goals as empty list, will be populated by initialize_agent_state
         self.goals: List[str] = initial_goals if initial_goals is not None else []

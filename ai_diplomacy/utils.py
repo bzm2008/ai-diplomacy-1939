@@ -224,6 +224,7 @@ async def get_valid_orders(
         log_file_path=log_file_path,
         phase=phase,
     )
+    card_play = getattr(client, "_last_card_play", None)
 
     invalid_info: list[str] = []
     valid: list[str] = []
@@ -233,7 +234,7 @@ async def get_valid_orders(
     if not isinstance(raw_orders, list):
         logger.warning("[%s] Orders received from LLM are not a list: %s. Using fallback.", power_name, raw_orders)
         model_error_stats[client.model_name]["order_decoding_errors"] += 1
-        return {"valid": client.fallback_orders(possible_orders), "invalid": []}
+        return {"valid": client.fallback_orders(possible_orders), "invalid": [], "card": card_play}
 
     # ── 3. Round-trip validation with engine ───────────────────
     CODE_TO_ENGINE = {"GBR": "BRITAIN", "FRA": "FRANCE", "GER": "GERMANY", "ITA": "ITALY", "POL": "POLAND", "SOV": "SOVIET", "ESP": "SPAIN", "USA": "USA"}
@@ -274,7 +275,15 @@ async def get_valid_orders(
     for order in prohibited_valid:
         logger.info("[USA] 孤立主义禁止：%s", order)
     invalid.extend(prohibited_valid)
-    return {"valid": allowed_valid, "invalid": invalid}
+    try:
+        from .cards import filter_card_orders
+        allowed_valid, card_forbidden = filter_card_orders(game, power_name, allowed_valid)
+        for order in card_forbidden:
+            logger.info("[CARD] %s 卡牌限制，指令作废：%s", power_name, order)
+        invalid.extend(card_forbidden)
+    except (ImportError, AttributeError):
+        pass
+    return {"valid": allowed_valid, "invalid": invalid, "card": card_play}
 
 
 def normalize_and_compare_orders(
@@ -495,6 +504,13 @@ async def run_llm_and_log(
 
         except RETRYABLE_EXCEPTIONS as e:
             last_exception = e
+            switch_route = getattr(client, "_switch_fallback_route", None)
+            if strict_mode and callable(switch_route) and switch_route():
+                logger.warning(
+                    "Primary route failed for %s/%s (%s); switched to configured fallback and will retry.",
+                    client.model_name, power_name, type(e).__name__,
+                )
+                continue
             if not strict_mode and attempt >= attempts:
                 break
 
@@ -515,6 +531,13 @@ async def run_llm_and_log(
 
         except Exception as e:
             last_exception = e
+            switch_route = getattr(client, "_switch_fallback_route", None)
+            if strict_mode and callable(switch_route) and switch_route():
+                logger.warning(
+                    "Primary route failed for %s/%s (%s); switched to configured fallback and will retry.",
+                    client.model_name, power_name, type(e).__name__,
+                )
+                continue
             if not strict_mode and attempt >= attempts:
                 break
             delay = min(

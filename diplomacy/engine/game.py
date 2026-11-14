@@ -227,7 +227,8 @@ class Game(Jsonable):
                  'convoy_paths_dest', 'zobrist_hash', 'renderer', 'game_id', 'map_name', 'role', 'rules',
                  'message_history', 'state_history', 'result_history', 'status', 'timestamp_created', 'n_controls',
                  'deadline', 'registration_password', 'observer_level', 'controlled_powers', '_phase_wrapper_type',
-                 'phase_abbr', '_unit_owner_cache', 'daide_port', 'fixed_state', 'power_model_map', 'phase_summaries']
+                 'phase_abbr', '_unit_owner_cache', 'daide_port', 'fixed_state', 'power_model_map', 'phase_summaries',
+                 'card_manager']
     zobrist_tables = {}
     rule_cache = ()
     model = {
@@ -299,6 +300,7 @@ class Game(Jsonable):
         self.fixed_state = None
         self.power_model_map = {}
         self.phase_summaries = {}
+        self.card_manager = None
         # Caches
         self._unit_owner_cache = None               # {(unit, coast_required): owner}
 
@@ -1011,6 +1013,9 @@ class Game(Jsonable):
             # Adjustment
             if current_phase_type == 'A':
                 build_count = len(power.centers) - len(power.units)
+                manager = getattr(self, 'card_manager', None)
+                if manager is not None and hasattr(manager, 'adjustment_balance'):
+                    build_count = manager.adjustment_balance(self, power.name)
 
                 # Building - All unoccupied homes
                 if build_count > 0:
@@ -2939,6 +2944,11 @@ class Game(Jsonable):
             # If we have units to remove or to build, we need to process
             for power in self.powers.values():
                 units, centers = len(power.units), len(power.centers)
+                manager = getattr(self, 'card_manager', None)
+                if manager is not None and hasattr(manager, 'adjustment_balance'):
+                    balance = manager.adjustment_balance(self, power.name)
+                    if balance != 0:
+                        return 0
                 if [x for x in power.centers if x in power.homes]:
                     centers += (0 + min(0, len([0 for x in power.units if x[2:5] in power.homes])))
                 if units > centers or (units < centers and self._build_limit(power)):
@@ -2994,8 +3004,12 @@ class Game(Jsonable):
         if sites is None:
             sites = self._build_sites(power)
 
-        # Returning number of sites
-        return len(sites)
+        # Card effects can add or remove builds for the upcoming adjustment.
+        limit = len(sites)
+        manager = getattr(self, 'card_manager', None)
+        if manager is not None and hasattr(manager, 'adjusted_build_limit'):
+            limit = manager.adjusted_build_limit(power.name, limit)
+        return max(0, limit)
 
     def _calculate_victory_score(self):
         """ Calculates the score to determine win for each power
@@ -3406,9 +3420,13 @@ class Game(Jsonable):
             power.adjust, power.civil_disorder = [], 0
             return
 
-        # Calculating if the power can build or remove units
+        # Calculating if the power can build or remove units. Card build
+        # modifiers affect only a positive build difference.
         adjust, places = [], []
-        need, sites = len(power.centers) - len(power.units), []
+        base_need = len(power.centers) - len(power.units)
+        manager = getattr(self, 'card_manager', None)
+        need = manager.adjustment_balance(self, power.name) if manager is not None and hasattr(manager, 'adjustment_balance') else base_need
+        sites = []
         order_type = 'D' if need < 0 else 'B'
 
         # If we can build, calculating list of possible build locations
@@ -3664,7 +3682,9 @@ class Game(Jsonable):
         for unit, order in self.command.items():
             word = order.split()
 
-            # Strength of a non-move or failed move is 1 + support
+            # Strength of a non-move or failed move is 1 + support.  Protected
+            # card units receive a large defensive bonus so supported attacks
+            # bounce without changing the normal dislodgement machinery.
             if word[0] != '-' or self.result[unit]:
                 place, strength = unit[2:5], 1
 
@@ -3676,6 +3696,9 @@ class Game(Jsonable):
 
             # Adds the list of supporting units
             # Only adding the support that DOES NOT count toward dislodgment
+            manager = getattr(self, 'card_manager', None)
+            if manager is not None and hasattr(manager, 'protection_bonus'):
+                strength += manager.protection_bonus(self, unit)
             self.combat \
                 .setdefault(place, {}) \
                 .setdefault(strength + self.supports[unit][0], []) \
@@ -4343,6 +4366,9 @@ class Game(Jsonable):
             # CIVIL DISORDER
             for power in self.powers.values():
                 diff = len(power.units) - len(power.centers)
+                manager = getattr(self, 'card_manager', None)
+                if manager is not None and hasattr(manager, 'adjustment_balance'):
+                    diff = -manager.adjustment_balance(self, power.name)
 
                 # Detecting missing orders
                 for order in power.adjust[:]:
@@ -4465,6 +4491,9 @@ class Game(Jsonable):
         # Processing Build and Disband
         for power in self.powers.values():
             diff = len(power.units) - len(power.centers)
+            manager = getattr(self, 'card_manager', None)
+            if manager is not None and hasattr(manager, 'adjustment_balance'):
+                diff = -manager.adjustment_balance(self, power.name)
 
             # For each order
             for order in power.adjust or []:
@@ -4515,6 +4544,12 @@ class Game(Jsonable):
             for dis_unit in power.retreats:
                 self.update_hash(power.name, unit_type=dis_unit[0], loc=dis_unit[2:], is_dislodged=True)
             power.adjust, power.retreats, power.civil_disorder = [], {}, 0
+
+        if self.phase_type == 'A':
+            manager = getattr(self, 'card_manager', None)
+            if manager is not None and hasattr(manager, 'consume_build_modifier'):
+                for power in self.powers.values():
+                    manager.consume_build_modifier(power.name)
 
         # Disbanding
         for unit in [u for u in self.dislodged]:

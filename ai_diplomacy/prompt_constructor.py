@@ -16,6 +16,7 @@ from .possible_order_context import (
     generate_rich_order_context_xml,
 )
 from .game_history import GameHistory  # Assuming GameHistory is correctly importable
+from .cards import card_context_for_power, get_card_manager
 
 # placeholder for diplomacy.Game to avoid circular or direct dependency if not needed for typehinting only
 # from diplomacy import Game # Uncomment if 'Game' type hint is crucial and available
@@ -258,6 +259,16 @@ def construct_order_generation_prompt(
     context = context.replace('Messages This Round\n\n\nEnd Messages', '')
 
     final_prompt = system_prompt + "\n\n" + context + "\n\n" + instructions
+
+    # Cards are only actionable in movement orders, but public declarations are
+    # shown in every order prompt so all countries can plan around them.
+    if phase_code == "M":
+        final_prompt += "\n\n" + card_context_for_power(get_card_manager(game), power_name, board_state.get("phase"))
+        final_prompt += (
+            "\n可选出牌格式（可省略 play_card）：在同一个 JSON 中加入 "
+            '`"play_card": {"card": "<card_id>", "reason": "<中文理由>", "target": "<目标>"}`。'
+            "每张牌一局只能用一次；非法、重复或缺少理由的出牌会被忽略，但不会影响 orders。"
+        )
 
     # Make the power names more LLM friendly
     final_prompt = (

@@ -111,6 +111,7 @@ class BaseModelClient:
         # Initialize success status. Will be updated based on outcome.
         success_status = "Failure: Initialized"
         parsed_orders_for_return = self.fallback_orders(possible_orders)  # Default to fallback
+        self._last_card_play = None
 
         try:
             strict_mode = os.environ.get("DIP_STRICT_MODEL_RESPONSES") == "1"
@@ -133,6 +134,9 @@ class BaseModelClient:
                 else:
                     formatted_response = raw_response
 
+                # Card plays are an optional side-channel in the same JSON object.
+                # They must never affect order parsing or strict order retries.
+                self._last_card_play = self._extract_card_play(formatted_response, power_name)
                 move_list = self._extract_moves(formatted_response, power_name)
                 if not move_list:
                     if strict_mode:
@@ -147,6 +151,13 @@ class BaseModelClient:
                     break
 
                 validated_moves, invalid_moves_list = self._validate_orders(move_list, possible_orders)
+                if self._last_card_play and str(self._last_card_play.get("card", "")).lower() in {
+                    "uk_upgrade", "fr_cluster", "de_cluster", "pl_cluster", "su_cluster"
+                }:
+                    validated_moves = await self._run_cluster_selection(
+                        prompt, formatted_response, validated_moves, possible_orders, power_name
+                    )
+                    invalid_moves_list = []
                 logger.debug(f"[{self.model_name}] Validated moves for {power_name}: {validated_moves}")
                 if invalid_moves_list and strict_mode:
                     logger.warning(
@@ -183,6 +194,67 @@ class BaseModelClient:
                     # token_usage and cost can be added later if available and if log_llm_response supports them
                 )
         return parsed_orders_for_return
+
+    async def _run_cluster_selection(
+        self,
+        prompt: str,
+        first_response: str,
+        first_orders: List[str],
+        possible_orders: Dict[str, List[str]],
+        power_name: str,
+    ) -> List[str]:
+        """Generate two extra independent candidates and let the model pick one."""
+        candidates = [first_orders]
+        raw_candidates = [first_response]
+        for index in (2, 3):
+            raw = await self.generate_response(
+                prompt + f"\n\n这是集群第 {index} 份独立候选方案。只返回 orders JSON。",
+                temperature=0.2,
+                inject_random_seed=True,
+            )
+            raw_candidates.append(raw)
+            moves = self._extract_moves(raw, power_name) or []
+            candidates.append(self._validate_orders(moves, possible_orders)[0])
+        chooser_prompt = (
+            "你正在选择三份外交订单候选。请只返回 JSON："
+            '{"choice": 1, "reason": "..."}。候选如下：\n' +
+            "\n".join(f"{i + 1}: {orders}" for i, orders in enumerate(candidates))
+        )
+        choice_raw = await self.generate_response(chooser_prompt, temperature=0.0, inject_random_seed=False)
+        match = re.search(r'"choice"\s*:\s*([123])', choice_raw or "")
+        choice = int(match.group(1)) if match else 1
+        reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', choice_raw or "")
+        reason = reason_match.group(1) if reason_match else "未提供"
+        logger.info("[CARD] %s 集群候选=%s 选择=%s 理由=%s", power_name, candidates, choice, reason)
+        return candidates[choice - 1]
+
+    def _extract_card_play(self, raw_response: str, power_name: str = "") -> Optional[dict]:
+        """Extract optional ``play_card`` data without changing order parsing."""
+        if not raw_response:
+            return None
+        candidates = []
+        for pattern in (
+            r"PARSABLE OUTPUT:\s*(\{[\s\S]*\})",
+            r"```(?:json)?\s*\n(\{[\s\S]*?\})\s*\n```",
+            r"(\{[\s\S]*\"orders\"\s*:\s*\[[\s\S]*?\][\s\S]*\})",
+        ):
+            match = re.search(pattern, raw_response, re.DOTALL)
+            if match:
+                candidates.append(match.group(1).strip())
+        for candidate in candidates:
+            for text in (candidate, re.sub(r",\s*([}\]])", r"\1", candidate), candidate.replace("'", '"')):
+                try:
+                    data = json.loads(text)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                play = data.get("play_card") if isinstance(data, dict) else None
+                if play is None:
+                    return None
+                if isinstance(play, dict):
+                    return play
+                logger.info("[%s] Ignoring malformed play_card for %s", self.model_name, power_name)
+                return None
+        return None
 
     def _extract_moves(self, raw_response: str, power_name: str) -> Optional[List[str]]:
         """
@@ -781,7 +853,52 @@ class OpenAIClient(BaseModelClient):
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY missing and no inline key provided")
 
+        self._routes = [(self.model_name, self.base_url, self.api_key)]
+        fallback_spec = os.environ.get("DIP_MODEL_FALLBACKS", "")
+        for item in fallback_spec.split(";"):
+            model, sep, route_list = item.partition("=")
+            if not sep or model.strip() != self.model_name:
+                continue
+            for route in route_list.split("|"):
+                route_spec = route.strip()
+                if not route_spec:
+                    continue
+                target_model = self.model_name
+                # Optional "model_alias@base#key" form. Plain "base#key" routes
+                # contain no '@', and a URL userinfo '@' must not be mistaken
+                # for a model alias.
+                if "@" in route_spec:
+                    alias, _, remainder = route_spec.partition("@")
+                    if (
+                        alias
+                        and remainder
+                        and not alias.startswith(("http://", "https://"))
+                        and "://" not in alias
+                    ):
+                        target_model = alias
+                        route_spec = remainder
+                base, sep, key = route_spec.partition("#")
+                if not sep or not base or not key:
+                    logger.warning(
+                        "[%s] Ignoring malformed fallback route %r (expected model@base#key or base#key).",
+                        self.model_name, route,
+                    )
+                    continue
+                entry = (target_model, base, key)
+                if entry not in self._routes:
+                    self._routes.append(entry)
+        self._route_index = 0
+        self._active_model_name = self.model_name
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=180.0, max_retries=0)
+
+    def _switch_fallback_route(self) -> bool:
+        if self._route_index + 1 >= len(self._routes):
+            return False
+        self._route_index += 1
+        self._active_model_name, self.base_url, self.api_key = self._routes[self._route_index]
+        self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=180.0, max_retries=0)
+        logger.warning("[%s] Switched to fallback model %s route %d/%d after primary failure.", self.model_name, self._active_model_name, self._route_index + 1, len(self._routes))
+        return True
 
     async def generate_response(
         self,
@@ -795,7 +912,7 @@ class OpenAIClient(BaseModelClient):
 
             # Determine which parameter to use based on model
             completion_params = {
-                "model": self.model_name,
+                "model": self._active_model_name,
                 "messages": [
                     {"role": "system", "content": system_prompt_content},
                     {"role": "user", "content": prompt_with_cta},

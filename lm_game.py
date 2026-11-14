@@ -31,6 +31,13 @@ from ai_diplomacy.game_logic import (
     initialize_new_game,
 )
 from ai_diplomacy.diary_logic import run_diary_consolidation
+from ai_diplomacy.cards import (
+    CardManager,
+    get_card_manager,
+    prepare_special_orders,
+    upgrade_model_spec,
+)
+from ai_diplomacy.clients import load_model_client
 from config import config
 
 dotenv.load_dotenv()
@@ -44,6 +51,56 @@ logging.basicConfig(
 # Silence noisy dependencies
 logging.getLogger("httpx").setLevel(logging.WARNING)
 # logging.getLogger("root").setLevel(logging.WARNING) # Assuming root handles AFC
+
+
+async def apply_special_card_actions(game, agents, orders_by_power, current_phase):
+    """Resolve cards that inspect or revise all submitted movement orders."""
+    manager = get_card_manager(game)
+    for effect in list(manager.active.values()):
+        card_id = effect.get("card_id")
+        if effect.get("last_phase") != current_phase:
+            continue
+        if card_id == "uk_ultra":
+            target_power = str(effect.get("target", "")).upper()
+            target_orders = orders_by_power.get(target_power, [])
+            if not target_orders or "BRITAIN" not in agents:
+                continue
+            prompt = (
+                f"ULTRA：请查看 {target_power} 本阶段指令并选择一条作废。\n"
+                f"指令：{target_orders}\n只返回 JSON：{{\"index\": 1, \"reason\": \"中文理由\"}}"
+            )
+            response = await agents["BRITAIN"].client.generate_response(
+                prompt, temperature=0.0, inject_random_seed=False
+            )
+            match = __import__("re").search(r'"index"\s*:\s*(\d+)', response or "")
+            index = int(match.group(1)) - 1 if match else 0
+            if 0 <= index < len(target_orders):
+                removed = target_orders.pop(index)
+                logger.info(
+                    "[CARD] BRITAIN 生效 ULTRA，作废 %s 的 %s，理由=%s",
+                    target_power, removed, effect.get("reason", ""),
+                )
+        elif card_id == "it_pact":
+            if "ITALY" not in agents or not gather_possible_orders(game, "ITALY"):
+                continue
+            german_orders = orders_by_power.get("GERMANY", [])
+            prompt = (
+                "钢铁条约：你已看到德国本阶段指令，请重新提交意大利本阶段完整 orders。\n"
+                f"德国指令：{german_orders}\n只返回 JSON {{\"orders\": [\"...\"]}}。"
+            )
+            response = await agents["ITALY"].client.generate_response(
+                prompt, temperature=0.0, inject_random_seed=False
+            )
+            moves = agents["ITALY"].client._extract_moves(response, "ITALY") or []
+            possible = gather_possible_orders(game, "ITALY")
+            replacement, _ = agents["ITALY"].client._validate_orders(moves, possible)
+            if replacement:
+                orders_by_power["ITALY"] = replacement
+                logger.info(
+                    "[CARD] ITALY 生效 钢铁条约，基于德国指令重新下单，理由=%s",
+                    effect.get("reason", ""),
+                )
+    return orders_by_power
 
 
 def _str2bool(v: str) -> bool:
@@ -321,10 +378,14 @@ async def main():
     
     if not is_resuming:
         game = Game(map_name=os.environ.get("DIP_MAP", "europe1939"))
+        game.card_manager = CardManager()
         game_history = GameHistory()
         if not hasattr(game, "phase_summaries"):
             game.phase_summaries = {}
         agents = await initialize_new_game(run_config, game, game_history, llm_log_file_path)
+
+    if getattr(game, "card_manager", None) is None:
+        game.card_manager = CardManager()
 
     if _detect_victory(game):
         game.is_game_done = True          # short-circuit the main loop
@@ -350,6 +411,18 @@ async def main():
 
         logger.info(f"PHASE: {current_phase} (time so far: {time.time() - start_whole:.2f}s)")
         game_history.add_phase(current_phase)
+        card_manager = get_card_manager(game)
+        card_manager.begin_phase(current_phase)
+        for agent in agents.values():
+            if agent.card_model_phases_remaining > 0:
+                agent.card_model_phases_remaining -= 1
+                if agent.card_model_phases_remaining == 0 and agent.card_original_model_id:
+                    replacement = load_model_client(agent.card_original_model_id, prompts_dir=agent.prompts_dir)
+                    replacement.max_tokens = agent.client.max_tokens
+                    replacement.set_system_prompt(agent.client.system_prompt)
+                    agent.client = replacement
+                    logger.info("[CARD] %s 结束模型牌，恢复 %s", agent.power_name, agent.card_original_model_id)
+                    agent.card_active_model_id = None
 
         # --- 4b. Pre-Order Generation Steps (Movement Phases Only) ---
         if current_short_phase.endswith("M"):
@@ -423,8 +496,11 @@ async def main():
         order_power_names = [p for p in active_powers if gather_possible_orders(game, p)]
         submitted_orders_this_phase = defaultdict(list)
 
+        raw_orders_by_power = {}
+        card_plays_by_power = {}
         for i, result in enumerate(order_results):
             p_name = order_power_names[i]
+            card_play = None
 
             if isinstance(result, Exception):
                 logger.error("Error getting orders for %s: %s", p_name, result, exc_info=result)
@@ -432,9 +508,41 @@ async def main():
             else:
                 valid   = result.get("valid", [])
                 invalid = result.get("invalid", [])
+                card_play = result.get("card")
+
+            if card_play is not None and current_short_phase.endswith("M"):
+                accepted, card_error = card_manager.validate_play(p_name, card_play, current_phase, game=game)
+                if accepted:
+                    card_plays_by_power[p_name] = card_play
+                    # Model and cluster cards are active immediately; other
+                    # cards have already been queued by validate_play.
+                    card_id = str(card_play.get("card", "")).lower()
+                    upgraded_model = upgrade_model_spec(card_id)
+                    if upgraded_model:
+                        agent = agents[p_name]
+                        if agent.card_original_model_id is None:
+                            agent.card_original_model_id = agent.client.model_name
+                        replacement = load_model_client(upgraded_model, prompts_dir=agent.prompts_dir)
+                        replacement.max_tokens = agent.client.max_tokens
+                        replacement.set_system_prompt(agent.client.system_prompt)
+                        agent.client = replacement
+                        agent.card_active_model_id = upgraded_model
+                        agent.card_model_phases_remaining = 4
+                        logger.info("[CARD] %s 生效 升级 -> %s", p_name, upgraded_model)
+                    if card_id == "es_wind":
+                        target_power = str(card_play.get("target", "")).upper()
+                        if target_power in agents[p_name].relationships:
+                            agents[p_name].relationships[target_power] = "Friendly"
+                            card_manager.relationship_events.append({
+                                "power": p_name, "target": target_power,
+                                "reason": str(card_play.get("reason", "")),
+                            })
+                            logger.info("[CARD] %s 生效 见风使舵，转向 %s", p_name, target_power)
+                else:
+                    logger.info("[CARD] %s 非法出牌忽略 card=%s 原因=%s", p_name, card_play.get("card") if isinstance(card_play, dict) else card_play, card_error)
 
             # what the engine will actually execute
-            game.set_orders(p_name, valid)
+            raw_orders_by_power[p_name] = valid
 
             # what we record for prompt/history purposes
             submitted_orders_this_phase[p_name] = valid + invalid
@@ -446,6 +554,15 @@ async def main():
                         game, valid + invalid, llm_log_file_path
                     )
                 
+        if current_short_phase.endswith("M"):
+            raw_orders_by_power = await apply_special_card_actions(
+                game, agents, raw_orders_by_power, current_phase
+            )
+        # Apply public special-card rewrites only after all orders are known.
+        raw_orders_by_power = prepare_special_orders(game, raw_orders_by_power)
+        for p_name, valid in raw_orders_by_power.items():
+            game.set_orders(p_name, valid)
+
         # --- 4d. Process Phase ---
         completed_phase = current_phase
         game.process()

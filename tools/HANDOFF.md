@@ -58,7 +58,7 @@ caffeinate -i .venv/bin/python ~/ai-diplomacy-1939-tools/run_game.py full
 ```
 
 预计耗时：试跑 20 到 60 分钟；正式局（打满到 1945）数小时到十几个小时，取决于模型响应速度。
-xin-zhi-zhu 网关偶尔抽风（超时、403、502），引擎对每次调用自动重试 5 次（指数退避），一般能自己恢复。
+普通 `test` 模式下，每次模型调用最多重试 5 次（指数退避）。正式局由 `tools/run_game.py full` 设置 `DIP_STRICT_MODEL_RESPONSES=1`：请求失败或空响应时持续指数退避重试；订单无法解析或不合法时重新请求；不使用默认军令，不推进当前阶段，直到获得成功且合法的模型输出。
 
 ## 4. 先跑试跑，确认通过再开正式局
 
@@ -116,16 +116,26 @@ python3 -I ~/ai-diplomacy-1939-tools/dump_phase.py ~/ai-diplomacy-1939/results/1
 
 ## 7. 已知问题
 
-1. **豆包额度**：火山方舟的每周额度在 2026-11-07 已用尽，返回 HTTP 429，重置时间 **2026-11-09 00:00（北京时间）**。在此之前不要开任何包含意大利的局，否则意大利每一轮都会失败并退回默认命令。
-2. **Grok 网关不稳**：`grok-4.7` 在 xin-zhi-zhu 上间歇性超时 / 403 / 502。重试通常能过。如果日志里 Germany 连续多个阶段报 `API Error after 5 attempts`，停下来换个时间再 `resume`。
+1. **豆包额度**：2026-11-09 00:00（北京时间）后已恢复。此前曾返回 HTTP 429；当前正式局已验证豆包端点可以继续返回 `thinking + text`，客户端必须提取 text block。若再次出现 429，严格正式局会等待恢复，不得 fallback。
+2. **Grok 网关不稳**：`grok-4.7` 在 xin-zhi-zhu 上间歇性超时 / 403 / 502。严格模式会持续重试；普通模式才会在有限重试后结束调用。
 3. **地图两条警告无害**：加载时会报 `POWER NAME CAN BE CONFUSED WITH LOCATION ALIAS: USA` 和 `DUPLICATE MAP LOCATION OR POWER: SPAIN`。这两条原版地图就有，已用三个随机种子各跑 40 年验证过不影响对局，忽略即可。
 4. **胜负判定日志文字是旧的**：日志里“a power has ≥18 centres”这句话是旧文本，实际阈值按地图走，是 22，不影响判定。
 5. **不要开 `--use_unformatted_prompts`**：那个模式每轮额外调用一次格式化模型，费 token 也更易错。提示词本身已要求 JSON 输出。
-6. **某国某轮命令解析失败**时，引擎自动用该位置的默认合法命令兜底（`fallback_orders`），对局不会因此中断，但该国那一轮等于在随机行动。`check_run.py` 里 `orders` 行的 `success` 不是 `success` 时就是这种情况，正式局里如果某个国家反复出现，记下来。
+6. **普通模式的命令兜底**：非严格模式下，某国某轮命令解析失败会用该位置的默认合法命令兜底。正式局必须经 `run_game.py full` 启动以启用 `DIP_STRICT_MODEL_RESPONSES=1`；严格模式不会接受该兜底，无法解析或非法订单会重新请求，任何调用异常也不会推进阶段。账本 `order_generation` 的 `success` 必须为 `Success` 才算该国本阶段有效。
 
-8. **Claude 拒答（已修复）**：原版下单提示词里写着“comprehensive reasoning”和“Reasoning:”标题，Claude Opus 5.5 会当成在索取内部思考而直接拒答（`stop_reason=refusal`，回复为空），英国每轮都退回默认命令。已在 `make_prompts.py` 里改成“简要分析 Analysis:”，并重新生成了提示词。如果以后重新生成提示词，这个修正会自动带上。日志里若再看到 `[claude-opus-5-5] LLM returned an empty or invalid response`，就是又触发了拒答，记下当时的阶段。
-9. **Grok 断线（已修复）**：xin-zhi-zhu 网关约 60 秒内没有输出就断开连接，Grok 默认的深度推理处理长提示词时会超过这个时间，于是每次都报 `APIConnectionError: Connection error`，一次调用重试下来要 15 分钟。`run_game.py` 已设置 `DIP_REASONING_EFFORT=grok-4.7=low`，实测 20 到 40 秒返回。不要去掉这个设置。
-10. **单次调用超时**：OpenAI 兼容客户端的超时已从默认 600 秒改为 180 秒，SDK 自带重试关掉，统一交给引擎的 5 次重试。
+7. **Claude 拒答（已修复）**：原版下单提示词里写着“comprehensive reasoning”和“Reasoning:”标题，Claude Opus 5.5 会当成在索取内部思考而直接拒答（`stop_reason=refusal`，回复为空），英国每轮都退回默认命令。已在 `make_prompts.py` 里改成“简要分析 Analysis:”，并重新生成了提示词。如果以后重新生成提示词，这个修正会自动带上。日志里若再看到 `[claude-opus-5-5] LLM returned an empty or invalid response`，就是又触发了拒答，记下当时的阶段。
+8. **Grok 断线（已修复）**：xin-zhi-zhu 网关约 60 秒内没有输出就断开连接，Grok 默认的深度推理处理长提示词时会超过这个时间，于是每次都报 `APIConnectionError: Connection error`，一次调用重试下来要 15 分钟。`run_game.py` 已设置 `DIP_REASONING_EFFORT=grok-4.7=low`，实测 20 到 40 秒返回。不要去掉这个设置。
+9. **单次调用超时**：OpenAI 兼容客户端的超时已从默认 600 秒改为 180 秒，SDK 自带重试关掉；普通模式统一交给引擎的 5 次重试，正式严格模式持续重试。
+
+## 8. 跑完之后
+
+正式局目录 `results/1939-full` 整体保留，不要清理。确认三件事：
+
+1. `overview.jsonl` 存在（说明正常结束，不是中途断的）。
+2. `check_run.py` 输出存一份：`python3 -I ~/ai-diplomacy-1939-tools/check_run.py results/1939-full > results/1939-full/check.txt`。
+3. 把最终各国家的中心数、胜者和结束阶段记到 `results/1939-full/README.txt`。
+
+复盘和视频由 Claude 负责，DeepSeek 不需要做。
 
 ## 9. 本次接手与额度恢复后试跑记录（2026-11-09）
 
@@ -138,13 +148,29 @@ python3 -I ~/ai-diplomacy-1939-tools/dump_phase.py ~/ai-diplomacy-1939/results/1
 - `narrative.py` 的可选摘要失败降级已修正：不再访问不存在的 `ALLOW_NARATION_FAILURE` 配置字段；新版 Python 3.13 AST 与 ThinkingBlock 跳过测试通过。
 - 新备用 Grok/Claude key 已保存为 `.env` 中的 `XZZ_GROK_ALT`、`XZZ_CLAUDE_ALT`，权限 600；最小探测直连和代理均为 `403 error code 1010`，尚未切换主配置。
 
-**正式局安全门槛：** v4 证明额度恢复后豆包端点能返回响应，但解析修复尚未经过新进程验证；计划阶段修复也尚未经过新进程验证；仍有连接断开、非法订单和空响应风险。因此当前结论仍是“引擎可推进，模型可靠性不通过”，不得启动 `full`。下一步应在独立新目录再跑一次 test，确认意大利 ThinkingBlock 与 planning 签名修复后，8 国两阶段订单均成功，再考虑正式局。
+**截至 2026-11-14 09:28（北京时间）的正式局状态：** 用户已明确要求启动正式局，并要求任一模型未成功生成有效内容前不得 fallback 或结算。`results/1939-full` 正在运行，当前存档阶段为 `F1939M`，63 条调用记录均为成功；F1939M 外交阶段中，法国 Kimi 后续请求先遇到 403 `REQUEST_FORBIDDEN`，之后持续出现 `APIConnectionError`，严格模式每 60 秒退避重试。该请求尚未写入调用账本，进程仍在运行；不得启动第二个进程、手动跳过法国或结算此阶段。恢复并成功生成消息后才可继续。文件 `results/1939-full/lmvsgame.json` 是最近阶段存档，正式局尚未完成，`overview.jsonl` 预期仅在整局正常结束时生成。
+
+## 10. 备用模型路由与 GitHub 发布（2026-11-14）
+
+- 法国 `kimi-k3.1-pro` 当前路由为 `XZZ_BASE` + `.env` 中 `XZZ_KIMI_ALT`；新 key 曾单独探测 HTTP 200 并返回 `PROBE_OK`，原 `CN_KEY` + `CN_BASE` 也曾返回 200。正式局长请求期间仍观察到 Kimi 403 `REQUEST_FORBIDDEN` 和 `APIConnectionError`，所以“单次可用”不代表持续稳定。不得把这类网关错误误报成 key 一定无效。
+- 波兰 `glm-5.3` 使用 `XZZ_BASE` + `XZZ_GLM_ALT`；苏联 `deepseek-v4.1-flash` 使用 `CN_BASE` + `CN_KEY`。该分配由用户与 Claude Code 确认，勿互换。
+- 意大利豆包、Kimi、GLM 都用 Anthropic 兼容端点时可能返回 `thinking` 和 `text` block；客户端必须提取 text block，不能假定第一个 block 有 `.text`。
+- 正式严格模式的环境变量由 `tools/run_game.py` 设置，不要用直接执行 `lm_game.py` 绕过。当前机制会对 API 异常持续重试；订单解析失败/非法订单会在调用层重新请求。阶段结算前还要确认严格模式异常检查覆盖所有并发任务，若进程意外退出先检查是否留下合法 `lmvsgame.json`，不得擅自从头开局或覆盖。
+- 2026-11-14 11:05：用户要求不再续跑，正式局进程已全部停止；`results/1939-full/lmvsgame.json` 保留在 `F1939M`，不得删除或覆盖。
+- 备用路由修复：`OpenAIClient` 现在解析 `DIP_MODEL_FALLBACKS` 的有序链，主路由失败后切换备用端点/密钥，并支持 `model@base#key` 形式的模型降级。当前启动器配置：Kimi → Max Kimi → Kuaipao `kimi/kimi-k3`；GLM → Kuaipao `glm-5.3` → `glm-5.3-flash`；Gemini → Kuaipao `gemini-4-argon`；Grok 的 Kuaipao 探测仍超时，未列为可靠 fallback。切换只发生在新进程，当前已停止的旧进程不会加载这次修改。
 
 
-正式局目录 `results/1939-full` 整体保留，不要清理。确认三件事：
+## 11. 卡牌系统（原任务，已由第 12 节接手完成）
 
-1. `overview.jsonl` 存在（说明正常结束，不是中途断的）。
-2. `check_run.py` 输出存一份：`python3 -I ~/ai-diplomacy-1939-tools/check_run.py results/1939-full > results/1939-full/check.txt`。
-3. 把最终各国家的中心数、胜者和结束阶段记到 `results/1939-full/README.txt`。
+卡牌设计已定，**代码尚未实现**。完整任务书见 `CARDS_TASK.md`（要改哪些文件、规则、测试清单、要问用户的点）。先做 test 通过，再按任务书分步做；正式局不要带着半成品卡牌开。
 
-复盘和视频由 Claude 负责，DeepSeek 不需要做。
+## 12. 卡牌系统接手实现记录（2026-11-14）
+
+- 正式局进程已按用户要求停止；`results/1939-full/lmvsgame.json` 保留，未启动第二个正式局。
+- 已新增 `ai_diplomacy/cards.py`：24 张牌定义、每国手牌、一次性校验、理由/目标校验、延迟生效、保护、建造/解散修正、焦土/管风琴/观望/见风使舵状态和 JSON 序列化。
+- 订单 JSON 新增可选 `play_card` 旁路；卡牌字段非法时只记日志并忽略，不触发严格模式订单重试。卡牌上下文和格式已加入 `prompt_constructor.py`，并通过 `make_prompts.py` 重新生成 `prompts_1939/`。
+- 主循环已接入：卡牌宣告与日志、模型牌客户端切换/恢复、集群三候选择一、ULTRA 作废指令、钢铁条约重下单、管风琴改写指令、观望/阿尔卑斯进攻过滤。
+- 引擎已接入保护强度和调整阶段建造/解散差额，卡牌状态写入 `lmvsgame.json` 顶层 `card_state`，续跑时恢复。
+- 英国升格网关探测返回 HTTP 404；按用户决定，`uk_upgrade` 改为集群行为。意大利 turbo/pro、美国 gpt-6.1-sol/astra、西班牙 gemini-4-carbon 探测成功；启动器已更新基础模型和卡牌路由，凭据仍只从 `.env` 注入。
+- 验证：`test_cards.py` 11 passed；`diplomacy/tests/test_game.py` 23 passed；`test_ww2_rules.py` 全部通过。仓库既有 `tests/test_models.py::test_power_name_aliases` 仍失败，因为测试引用不存在的 `PowerEnum.ENGLAND`，与卡牌改动无关。
+- 后续开局前仍需决定是否恢复正式局；先跑一次带卡牌的独立试跑，再恢复正式局。

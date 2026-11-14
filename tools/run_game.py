@@ -18,11 +18,17 @@ MODELS = [
     ("openai", "claude-opus-5-5", "XZZ_BASE", "XZZ_CLAUDE"),
     ("openai", "kimi-k3.1-pro", "XZZ_BASE", "XZZ_KIMI_ALT"),
     ("openai", "grok-4.7", "XZZ_BASE", "XZZ_GROK"),
-    ("anthropic", "doubao-seed-2.1-lite", "ARK_BASE", "ARK_AGENT_PLAN_CN_API_KEY"),
+    ("anthropic", "doubao-seed-2.1-turbo", "ARK_BASE", "ARK_AGENT_PLAN_CN_API_KEY"),
     ("openai", "glm-5.3", "XZZ_BASE", "XZZ_GLM_ALT"),
     ("openai", "deepseek-v4.1-flash", "CN_BASE", "CN_KEY"),
     ("openai", "gemini-4-argon", "XZZ_BASE", "XZZ_GEMINI"),
-    ("openai", "gpt-6-astra", "XZZ_BASE", "XZZ_GPT"),
+    ("openai", "gpt-6.1-sol", "XZZ_BASE", "XZZ_GPT"),
+]
+# Card upgrade routes are injected at launch so credentials never live in code.
+UPGRADES = [
+    ("us_upgrade", "openai:gpt-6-astra", "XZZ_BASE", "XZZ_GPT"),
+    ("it_upgrade", "anthropic:doubao-seed-2.1-pro", "ARK_BASE", "ARK_AGENT_PLAN_CN_API_KEY"),
+    ("es_upgrade", "openai:gemini-4-carbon", "XZZ_BASE", "XZZ_GEMINI"),
 ]
 # 阶段摘要和 JSON 格式化用便宜模型（走国产网关）
 NARRATIVE = "openai:deepseek-v4.1-flash@{CN_BASE}#{CN_KEY}"
@@ -78,6 +84,18 @@ def main():
     # Grok 默认深度推理超过网关 60 秒断线，必须用 low
     os.environ["DIP_REASONING_EFFORT"] = "grok-4.7=low"
     os.environ["DIP_STRICT_MODEL_RESPONSES"] = "1"
+    os.environ["DIP_MODEL_FALLBACKS"] = ";".join([
+        f"kimi-k3.1-pro={env['CN_BASE']}#{env['CN_KEY']}|kimi/kimi-k3@{env['KUAIPAO_BASE']}#{env['KUAIPAO_KEY']}",
+        f"grok-4.7={env['XZZ_BASE']}#{env['XZZ_GROK_ALT']}|{env['KUAIPAO_BASE']}#{env['KUAIPAO_KEY']}",
+        f"glm-5.3={env['KUAIPAO_BASE']}#{env['KUAIPAO_KEY']}|glm-5.3-flash@{env['KUAIPAO_BASE']}#{env['KUAIPAO_KEY']}",
+        f"gemini-4-argon={env['KUAIPAO_BASE']}#{env['KUAIPAO_KEY']}",
+    ])
+    os.environ["DIP_CARD_UPGRADE_MODELS"] = ";".join(
+        f"{card_id}={protocol}:{model}@{env[base]}#{env[key]}"
+        for card_id, model, base, key in UPGRADES
+        for protocol in [model.split(":", 1)[0]]
+        for model in [model.split(":", 1)[1]]
+    )
     os.environ["AI_DIPLOMACY_NARRATIVE_MODEL"] = NARRATIVE.format(**env)
     os.environ["AI_DIPLOMACY_FORMATTER_MODEL"] = NARRATIVE.format(**env)
     os.chdir(REPO)
