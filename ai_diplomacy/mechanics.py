@@ -72,15 +72,41 @@ def phase_year(phase: str) -> Optional[int]:
     return parsed[1] if parsed else None
 
 
-# 施佩尔奇迹 (Speer miracle): Germany's wartime armaments surge. The build
-# bonus mirrors the USA arsenal hook below; the broadcast notice in
-# mechanics_context_for_power deliberately omits the end year (only
-# Germany's own system prompt states the 1944 expiry).
-SPEER_MIRACLE_YEARS = (1942, 1944)
+# Time-bounded wartime production bonuses: one extra build each winter
+# inside the window, mirroring the USA arsenal hook below (the same +1 also
+# exempts the overbuilt unit from forced disband while active).
+# Germany: Speer miracle 1942-1944; Soviet: Urals industry 1943-1944;
+# Britain: Atlantic victory 1943-1944. Broadcast notices deliberately omit
+# the end year (only each power's own system prompt states the 1944 expiry).
+PRODUCTION_BONUS_YEARS = {
+    "GERMANY": (1942, 1944),
+    "SOVIET": (1943, 1944),
+    "BRITAIN": (1943, 1944),
+}
+
+PRODUCTION_BONUS_NOTICES = {
+    "GERMANY": (
+        "【历史事件·施佩尔奇迹】1942 年，施佩尔出任德国军备部长，德国军工产量大幅提升："
+        "德国每个冬季可多建造一支单位。"
+    ),
+    "SOVIET": (
+        "【历史事件·乌拉尔军工】1943 年，迁往乌拉尔的苏联工业全力开工，苏联军工产量大幅提升："
+        "苏联每个冬季可多建造一支单位。"
+    ),
+    "BRITAIN": (
+        "【历史事件·大西洋胜利】1943 年，大西洋航线打通，英国物资供应大幅改善："
+        "英国每个冬季可多建造一支单位。"
+    ),
+}
+
+
+def production_bonus_active(power_name: str, year: Optional[int]) -> bool:
+    window = PRODUCTION_BONUS_YEARS.get(power_name)
+    return year is not None and window is not None and window[0] <= year <= window[1]
 
 
 def speer_miracle_active(year: Optional[int]) -> bool:
-    return year is not None and SPEER_MIRACLE_YEARS[0] <= year <= SPEER_MIRACLE_YEARS[1]
+    return production_bonus_active("GERMANY", year)
 
 
 def phase_season(phase: str) -> Optional[str]:
@@ -261,9 +287,9 @@ class MechanicsManager:
         """Adjust an adjustment-phase balance (centers - units, card-adjusted).
 
         Positive = builds allowed, negative = disbands required. Applies, in
-        order: exile disband exemption, USA arsenal bonus, Germany Speer
-        bonus, famine build ban, exile-funding build cost. Only active
-        during adjustment phases.
+        order: exile disband exemption, USA arsenal bonus, time-bounded
+        production bonuses, famine build ban, exile-funding build cost.
+        Only active during adjustment phases.
         """
         if getattr(game, "phase_type", None) != "A":
             return balance
@@ -278,8 +304,9 @@ class MechanicsManager:
             # 民主兵工厂: one extra build each winter; the same +1 also
             # exempts the overbuilt unit from forced disband next winter.
             balance += 1
-        if passives_enabled() and power_name == "GERMANY" and speer_miracle_active(year):
-            # 施佩尔奇迹: one extra build each winter 1942-1944; the same +1
+        if passives_enabled() and production_bonus_active(power_name, year):
+            # Time-bounded production bonus (Speer / Urals / Atlantic):
+            # one extra build each winter inside the window; the same +1
             # also exempts the overbuilt unit from forced disband while active.
             balance += 1
         if events_enabled():
@@ -322,14 +349,14 @@ def mechanics_context_for_power(
     if manager is None:
         return ""
     blocks: list[str] = []
-    if passives_enabled() and speer_miracle_active(phase_year(phase)):
-        # Broadcast to every power: the fact is public (builds are visible
-        # on the board anyway); the 1944 expiry is stated only in
-        # Germany's own system prompt.
-        blocks.append(
-            "【历史事件·施佩尔奇迹】1942 年，施佩尔出任德国军备部长，德国军工产量大幅提升："
-            "德国每个冬季可多建造一支单位。"
-        )
+    if passives_enabled():
+        # Broadcast to every power: the facts are public (builds are visible
+        # on the board anyway); the 1944 expiry is stated only in each
+        # power's own system prompt.
+        year = phase_year(phase)
+        for bonus_power, notice in PRODUCTION_BONUS_NOTICES.items():
+            if production_bonus_active(bonus_power, year):
+                blocks.append(notice)
     if events_enabled():
         block = manager.events.context_block_for_power(game, power_name, agent_relationships or {}, phase)
         if block:
