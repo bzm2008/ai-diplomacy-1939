@@ -862,6 +862,53 @@ def test_random_smoke():
                 os.environ[k] = v
 
 
+def test_unit_owner_cache():
+    """Regression: units moved/added by mechanics must stay orderable.
+
+    The engine builds Game._unit_owner_cache once and never refreshes it on
+    its own; mechanics.py unit mutators must invalidate it, otherwise the
+    moved/added unit is invisible to Game._unit_owner and ALL of its orders
+    are rejected as UNORDERABLE UNIT (trial run: Germany's bonus-moved A BUD
+    lost its Fall 1939 support order this way).
+    """
+    section("10. 单位归属缓存失效回归")
+    g = fresh_game()
+    # Warm the cache the way a real phase does (any order op builds it).
+    g.clear_orders("GERMANY")
+    g.set_orders("GERMANY", ["A VIE H"])
+    check("预热后缓存已建立", g._unit_owner_cache is not None)
+    # Bonus move via the real passive path: A VIE -> BUD (empty neutral SC).
+    ok, why = apply_bonus_move(g, "GERMANY", "A VIE", "BUD", [])
+    check("奖励移动 VIE->BUD 成功", ok, why)
+    check("A BUD 在德国单位列表中", "A BUD" in g.powers["GERMANY"].units)
+    # The moved unit must accept orders (hold / move / support).
+    g.clear_orders("GERMANY")
+    g.set_orders("GERMANY", ["A BUD H"])
+    check("移动后单位可下 HOLD 令", g.get_orders("GERMANY") == ["A BUD H"])
+    g.clear_orders("GERMANY")
+    g.set_orders("GERMANY", ["A BUD - VIE"])
+    check("移动后单位可下移动令", g.get_orders("GERMANY") == ["A BUD - VIE"])
+    g.clear_orders("GERMANY")
+    g.set_orders("GERMANY", ["A BUD S A GAL - VIE"])
+    check("移动后单位可下支援令", g.get_orders("GERMANY") == ["A BUD S A GAL - VIE"])
+    # Added units (reserves event / exile funding) must be orderable too.
+    g2 = fresh_game()
+    g2.clear_orders("ITALY")
+    g2.set_orders("ITALY", ["A VEN H"])
+    check("预备役增援单位可添加", add_unit(g2, "ITALY", "A APU"))
+    g2.clear_orders("ITALY")
+    g2.set_orders("ITALY", ["A APU H"])
+    check("新增单位可下 HOLD 令", g2.get_orders("ITALY") == ["A APU H"])
+    # Removed units must NOT stay orderable via a stale cache entry.
+    g3 = fresh_game()
+    g3.clear_orders("FRANCE")
+    g3.set_orders("FRANCE", ["A PAR H"])
+    check("移除单位", remove_unit(g3, "FRANCE", "A PAR"))
+    g3.clear_orders("FRANCE")
+    g3.set_orders("FRANCE", ["A PAR H"])
+    check("已移除单位不再可下令", g3.get_orders("FRANCE") == [])
+
+
 def main():
     test_passives()
     test_events()
@@ -872,6 +919,7 @@ def main():
     test_is_active_audit()
     test_env_switches()
     test_random_smoke()
+    test_unit_owner_cache()
     print(f"\n全部通过：{len(PASSED)} 个断言")
 
 

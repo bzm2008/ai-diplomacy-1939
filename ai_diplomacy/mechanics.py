@@ -130,6 +130,21 @@ def _update_influence(game: Any, power: Any, loc: str) -> None:
         power.influence.append(loc)
 
 
+def _invalidate_unit_owner_cache(game: Any) -> None:
+    """Drop the engine's lazily built unit->owner cache.
+
+    ``Game._unit_owner_cache`` is built once and never refreshed on its own;
+    every direct ``power.units`` mutation below must invalidate it, otherwise
+    the moved/added unit is invisible to ``Game._unit_owner`` and all of its
+    orders are rejected as UNORDERABLE UNIT (this silently dropped Germany's
+    bonus-moved army's Fall 1939 support order in the trial run).
+    """
+    try:
+        game._unit_owner_cache = None
+    except Exception:
+        pass
+
+
 def add_unit(game: Any, power_name: str, unit: str) -> bool:
     """Append a unit to a power's army, keeping hash/influence consistent."""
     power = game.powers.get(power_name)
@@ -141,6 +156,7 @@ def add_unit(game: Any, power_name: str, unit: str) -> bool:
     game.update_hash(power.name, unit_type=unit[0], loc=unit[2:])
     power.units.append(unit)
     _update_influence(game, power, unit_loc(unit))
+    _invalidate_unit_owner_cache(game)
     return True
 
 
@@ -150,6 +166,7 @@ def remove_unit(game: Any, power_name: str, unit: str) -> bool:
         return False
     game.update_hash(power.name, unit_type=unit[0], loc=unit[2:])
     power.units.remove(unit)
+    _invalidate_unit_owner_cache(game)
     return True
 
 
@@ -168,6 +185,7 @@ def move_unit(game: Any, power_name: str, unit: str, dest: str) -> Optional[str]
     game.update_hash(power.name, unit_type=new_unit[0], loc=new_unit[2:])
     power.units.append(new_unit)
     _update_influence(game, power, dest)
+    _invalidate_unit_owner_cache(game)
     return new_unit
 
 
