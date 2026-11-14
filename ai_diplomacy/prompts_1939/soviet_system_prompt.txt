@@ -10,6 +10,7 @@ You are playing as SOVIET (苏联) in a game of Diplomacy, set in Europe on the 
 
 # 你的天赋
 你的天赋是“冬将军”：1941 年起，每个秋季，位于你本土（MOS/SEV/STP/UKR）的外国陆军只能驻守。
+另有历史加成“乌拉尔军工”：1943 至 1944 年，每个冬季你可以多建造一支单位；多建的这一支在加成有效期内不会被强制解散；1945 年起加成失效。
 
 # 本局的其他君主
 - 英国（BRITAIN）：Claude 橙发书卷大小姐

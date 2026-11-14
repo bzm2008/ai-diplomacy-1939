@@ -31,7 +31,7 @@ from ai_diplomacy.game_history import GameHistory  # noqa: E402
 from ai_diplomacy.game_logic import save_game_state  # noqa: E402
 from ai_diplomacy.mechanics import (  # noqa: E402
     add_unit, get_mechanics_manager, mechanics_context_for_power, move_unit,
-    remove_unit, speer_miracle_active,
+    production_bonus_active, remove_unit, speer_miracle_active,
 )
 from ai_diplomacy.negotiations import conduct_negotiations  # noqa: E402
 from ai_diplomacy.passives import (  # noqa: E402
@@ -263,6 +263,72 @@ def test_passives():
           speer_miracle_active(1942) and speer_miracle_active(1944)
           and not speer_miracle_active(1941) and not speer_miracle_active(1945)
           and not speer_miracle_active(None))
+
+    # 苏联乌拉尔军工 + 英国大西洋胜利：1943-1944 年冬季 +1 建造，1945 年起失效
+    for power, winter, expected_bonus in [
+        ("SOVIET", "W1942A", 0), ("SOVIET", "W1943A", 1),
+        ("SOVIET", "W1944A", 1), ("SOVIET", "W1945A", 0),
+        ("BRITAIN", "W1942A", 0), ("BRITAIN", "W1943A", 1),
+        ("BRITAIN", "W1944A", 1), ("BRITAIN", "W1945A", 0),
+    ]:
+        g = fresh_game()
+        remove_unit(g, "FRANCE", g.powers["FRANCE"].units[0])  # 制造不平衡，否则引擎跳过冬季
+        advance_to(g, winter)
+        pw = g.powers[power]
+        while len(pw.units) > len(pw.centers) - 1:
+            remove_unit(g, power, pw.units[0])
+        raw = len(pw.centers) - len(pw.units)
+        check(f"{power} {winter} 加成 {expected_bonus}",
+              g._adjustment_balance(g.powers[power]) == raw + expected_bonus,
+              f"raw={raw} adjusted={g._adjustment_balance(g.powers[power])}")
+    for power, winter in [("SOVIET", "W1943A"), ("BRITAIN", "W1944A")]:
+        g = fresh_game()
+        remove_unit(g, "FRANCE", g.powers["FRANCE"].units[0])
+        advance_to(g, winter)
+        pw = g.powers[power]
+        occupied = {u.split()[-1].split("/")[0] for p in g.powers.values() for u in p.units}
+        empties = [loc for loc in sorted(g.map.loc_type) if g.map.loc_type[loc] != "WATER" and loc not in occupied]
+        while len(pw.units) <= len(pw.centers):
+            add_unit(g, power, f"A {empties.pop(0)}")
+        check(f"{power} {winter} 超建豁免（balance 不为负）",
+              g._adjustment_balance(g.powers[power]) == 0,
+              f"units={len(pw.units)} centers={len(pw.centers)}")
+    for power in ["SOVIET", "BRITAIN"]:
+        g = fresh_game()
+        remove_unit(g, "FRANCE", g.powers["FRANCE"].units[0])
+        advance_to(g, "W1945A")
+        pw = g.powers[power]
+        occupied = {u.split()[-1].split("/")[0] for p in g.powers.values() for u in p.units}
+        empties = [loc for loc in sorted(g.map.loc_type) if g.map.loc_type[loc] != "WATER" and loc not in occupied]
+        while len(pw.units) <= len(pw.centers):
+            add_unit(g, power, f"A {empties.pop(0)}")
+        check(f"{power} 1945 年失效后超建须解散",
+              g._adjustment_balance(g.powers[power]) == -1,
+              f"units={len(pw.units)} centers={len(pw.centers)}")
+    # 广播：1942 年只有施佩尔，1943-1944 年三项齐全且不透露截止期，1945 年消失
+    g = fresh_game()
+    b42 = mechanics_context_for_power(g, GameHistory(), "FRANCE", {}, "F1942M")
+    check("1942 年只有施佩尔广播",
+          "施佩尔奇迹" in b42 and "乌拉尔军工" not in b42 and "大西洋胜利" not in b42, b42[:100])
+    b43 = mechanics_context_for_power(g, GameHistory(), "FRANCE", {}, "S1943M")
+    check("1943 年三项广播齐全",
+          "施佩尔奇迹" in b43 and "乌拉尔军工" in b43 and "大西洋胜利" in b43, b43[:160])
+    check("1943 年广播不透露截止期", "1944" not in b43, b43[:160])
+    b45 = mechanics_context_for_power(g, GameHistory(), "FRANCE", {}, "S1945M")
+    check("1945 年生产加成广播消失",
+          "施佩尔奇迹" not in b45 and "乌拉尔军工" not in b45 and "大西洋胜利" not in b45, b45[:80])
+    check("苏联提示词写明截止期",
+          "1944" in PASSIVE_TEXTS["SOVIET"] and "乌拉尔军工" in PASSIVE_TEXTS["SOVIET"])
+    check("英国提示词写明截止期",
+          "1944" in PASSIVE_TEXTS["BRITAIN"] and "大西洋胜利" in PASSIVE_TEXTS["BRITAIN"])
+    check("生产加成窗口判定",
+          production_bonus_active("GERMANY", 1942) and production_bonus_active("GERMANY", 1944)
+          and not production_bonus_active("GERMANY", 1945)
+          and not production_bonus_active("SOVIET", 1942) and production_bonus_active("SOVIET", 1943)
+          and not production_bonus_active("SOVIET", 1945)
+          and production_bonus_active("BRITAIN", 1944) and not production_bonus_active("BRITAIN", 1945)
+          and not production_bonus_active("USA", 1943) and not production_bonus_active("FRANCE", 1943)
+          and not production_bonus_active("SOVIET", None))
 
     # 西班牙：绝不成为针对性事件目标
     g = fresh_game()
