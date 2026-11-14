@@ -26,6 +26,7 @@ from .utils import load_prompt, run_llm_and_log, log_llm_response, log_llm_respo
 
 # Import DiplomacyAgent for type hinting if needed, but avoid circular import if possible
 from .prompt_constructor import construct_order_generation_prompt, build_context_prompt
+from .cards import card_context_for_power, get_card_manager
 # Moved formatter imports to avoid circular import - imported locally where needed
 
 # set logger back to just info
@@ -541,6 +542,16 @@ class BaseModelClient:
             agent_private_diary=agent_private_diary_str,  # Pass diary string
             prompts_dir=self.prompts_dir,
         )
+
+        # Surface the power's remaining cards (with effects) so plans can
+        # consider real card ids instead of guessing. Movement phases only:
+        # cards cannot be played in retreat/adjustment phases.
+        try:
+            _phase = str(game.get_current_phase())
+        except Exception:
+            _phase = ""
+        if re.match(r"^[SF]\d{4}M$", _phase):
+            context += "\n\n" + card_context_for_power(get_card_manager(game), power_name)
 
         return context + "\n\n" + instructions
 
