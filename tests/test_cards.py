@@ -114,3 +114,33 @@ def test_order227_holds_enemy_unit_in_adjacent_province():
     game.powers["GERMANY"].units = ["A WAR"]
     orders = prepare_special_orders(game, {"GERMANY": ["A WAR - SIL"]})
     assert orders["GERMANY"] == ["A WAR H"]
+
+
+def test_card_context_describes_each_remaining_card_effect():
+    """Models held every card because prompts only showed bare ids.
+
+    The per-phase card context must name each remaining card and state what
+    it does, so a model can tell a cluster (no model swap) from an upgrade.
+    """
+    from ai_diplomacy.cards import CARD_EFFECTS
+
+    assert set(CARD_EFFECTS) == set(CARD_DEFINITIONS)
+    assert all(text.strip() for text in CARD_EFFECTS.values())
+    manager = CardManager()
+    for power in CardManager.POWERS:
+        text = card_context_for_power(manager, power, "S1939M")
+        for card_id in manager.remaining[power]:
+            assert card_id in text
+            assert CARD_DEFINITIONS[card_id].name in text
+            assert CARD_EFFECTS[card_id] in text
+    britain = card_context_for_power(manager, "BRITAIN", "S1939M")
+    assert "不换模型" in britain
+    assert "作废" in britain
+    usa = card_context_for_power(manager, "USA", "S1939M")
+    assert "GPT-6 Astra" in usa
+    assert "18个中心" in usa
+    # Played cards leave the hand listing; declarations stay public.
+    assert manager.validate_play("FRANCE", {"card": "fr_maginot", "reason": "守住", "target": "BRE PAR"}, "S1939M")[0]
+    france = card_context_for_power(manager, "FRANCE", "F1939M")
+    assert "fr_maginot（马奇诺防线）" not in france
+    assert "fr_maginot" in france  # still visible as a public declaration

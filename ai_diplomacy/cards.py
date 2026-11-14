@@ -332,15 +332,65 @@ def get_card_manager(game: Any) -> CardManager:
     return manager
 
 
+# One-line effect summaries shown to the model holding each card. These must
+# match the implemented mechanics in this module. Before this existed, models
+# only ever saw bare card ids: several explicitly held their cards because
+# the effects were unclear ("三张卡牌的具体效果尚不明确"), and one planned
+# to play a nonexistent card id ("model"). Descriptions state timing
+# (immediate vs next movement phase), targets, and conditions.
+_CLUSTER_EFFECT = "立即生效，仅出牌当阶段：同一模型多生成两份候选指令、自己挑一份最优的下出，不换模型。代价：下个调整阶段建造-1。"
+
+CARD_EFFECTS: dict[str, str] = {
+    "uk_upgrade": _CLUSTER_EFFECT,
+    "uk_guard": "下个移动阶段起，持续2个阶段：爱丁堡、伦敦、利物浦的守军强度+10。",
+    "uk_ultra": "须指定目标国家（target写国家英文名）。下个移动阶段：你可以看到该国本阶段提交的全部指令，并选择其中一条作废。",
+    "us_upgrade": "立即生效：换上更强的模型（默认为GPT-6 Astra），持续4个阶段，之后自动换回。代价：下个调整阶段建造-1。",
+    "us_industry": "下个移动阶段生效：下个调整阶段建造+2。",
+    "us_manhattan": "须1942年或之后、且至少一个国家达到18个中心才能出。下个移动阶段生效：中心数最多的非美国国家在下个调整阶段多解散2支部队。",
+    "it_upgrade": "立即生效：换上更强的模型（默认为豆包Seed 2.1 Pro），持续4个阶段，之后自动换回。代价：下个调整阶段建造-1。",
+    "it_mare": "下个移动阶段起，持续2个阶段：那不勒斯、罗马、威尼斯的守军强度+10。",
+    "it_pact": "下个移动阶段：你可以看到德国本阶段提交的全部指令，然后重新下一遍自己的指令。",
+    "es_upgrade": "立即生效：换上更强的模型（默认为Gemini 4 Carbon），持续4个阶段，之后自动换回。代价：下个调整阶段建造-1。",
+    "es_watch": "下个移动阶段起，持续2个阶段：你所有单位所在省份的守军强度+10；期间你不能进攻外国单位。",
+    "es_wind": "须指定目标国家（target写国家英文名）。宣告后立即生效：西班牙对该国的关系变为友好。",
+    "fr_cluster": _CLUSTER_EFFECT,
+    "fr_maginot": "须指定BRE、MAR、PAR中的两个省份（target写两个省代码）。下个移动阶段起，持续2个阶段：这两个省的守军强度+10。",
+    "fr_saar": "下个移动阶段生效：下个调整阶段建造+1。",
+    "de_cluster": _CLUSTER_EFFECT,
+    "de_alps": "下个移动阶段起，持续2个阶段：慕尼黑、维也纳的守军强度+10；期间德国不能进攻外国单位。",
+    "de_blitz": "下个移动阶段生效：下个调整阶段建造+1。",
+    "pl_cluster": _CLUSTER_EFFECT,
+    "pl_hel": "下个移动阶段起，持续2个阶段：华沙守军强度+10。",
+    "pl_stubborn": "须指定一个当前有波兰单位的省份（target写省代码）。下个移动阶段起，持续2个阶段：该省守军强度+10。",
+    "su_cluster": _CLUSTER_EFFECT,
+    "su_scorched": "下个移动阶段生效：宣告时苏联持有的补给中心，若被他国占领，在下个调整阶段不计入占领者的建造额度。",
+    "su_order227": "须指定一个与苏联单位相邻、且有敌方单位的省份（target写省代码）。下个移动阶段：该敌方单位的指令被强制改为驻守。",
+}
+
+
 def card_context_for_power(manager: CardManager, power: str, phase: str | None = None) -> str:
     power = canonical_power(power)
-    hand = ", ".join(manager.remaining.get(power, [])) or "（无）"
+    lines = ["# 卡牌"]
+    remaining = manager.remaining.get(power, [])
+    if remaining:
+        lines.append("你的剩余手牌（每张一局只能用一次）：")
+        for card_id in remaining:
+            definition = CARD_DEFINITIONS.get(card_id)
+            name = definition.name if definition else card_id
+            effect = CARD_EFFECTS.get(card_id, "")
+            if effect:
+                lines.append(f"- {card_id}（{name}）：{effect}")
+            else:
+                lines.append(f"- {card_id}（{name}）")
+    else:
+        lines.append("你的剩余手牌：（无）")
     public = [
         f"{item['power']} {item['card_id']} target={item.get('target') or '无'}"
         for item in manager.declarations
     ]
     public_text = "；".join(public) if public else "（无）"
-    return f"# 卡牌\n你的剩余手牌：{hand}\n已宣告（所有国家可见）：{public_text}\n"
+    lines.append(f"已宣告（所有国家可见）：{public_text}")
+    return "\n".join(lines) + "\n"
 
 
 def filter_card_orders(game: Any, power: str, orders: Iterable[str]) -> tuple[list[str], list[str]]:
