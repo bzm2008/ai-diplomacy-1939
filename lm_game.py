@@ -30,6 +30,13 @@ from ai_diplomacy.game_logic import (
     load_game_state,
     initialize_new_game,
 )
+from ai_diplomacy.checkpoint import (
+    checkpoint_enabled,
+    clear_checkpoint,
+    load_checkpoint,
+    restore_checkpoint,
+    save_checkpoint,
+)
 from ai_diplomacy.diary_logic import run_diary_consolidation
 from ai_diplomacy.cards import (
     CardManager,
@@ -417,23 +424,60 @@ async def main():
     game_history: GameHistory
     run_config: Namespace = args # Default to current args
 
+    # --- 3b. Mid-phase checkpoint: loaded once, used by the branches below.
+    # A checkpoint overlays mid-phase progress (negotiation rounds, plans,
+    # diaries) onto a resume. Any problem -> full phase replay / new game.
+    _payload = load_checkpoint(run_dir) if checkpoint_enabled() else None
+    checkpoint_progress = None
+    _loaded_from_save = False
     if is_resuming:
         try:
             # When resuming, we always use the provided params (they will override the params used in the saved state)
             game, agents, game_history, _ = load_game_state(run_dir, game_file_name, run_config, args.resume_from_phase)
-
+            _loaded_from_save = True
             logger.info(f"Successfully resumed game from phase: {game.get_current_phase()}.")
         except (FileNotFoundError, ValueError) as e:
             logger.error(f"Could not resume game: {e}. Starting a new game instead.")
             is_resuming = False # Fallback to new game
-    
-    if not is_resuming:
+
+    if _loaded_from_save and _payload is not None:
+        # Normal case: overlay the checkpoint onto the loaded save.
+        try:
+            agents, checkpoint_progress = restore_checkpoint(
+                game, agents, game_history, _payload, run_config
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back to full replay
+            logger.warning("[断点] 断点不可用（%s），整阶段重跑。", exc)
+            checkpoint_progress = None
+    elif not _loaded_from_save and _payload is not None:
+        # No save (no phase ever settled) but a checkpoint exists: rebuild
+        # from the fresh map — the board state of a game that never settled
+        # a phase — and overlay the checkpoint. restore_checkpoint rejects
+        # a checkpoint for any phase but the fresh game's first phase.
+        try:
+            game = Game(map_name=os.environ.get("DIP_MAP", "europe1939"))
+            game.card_manager = CardManager()
+            game_history = GameHistory()
+            if not hasattr(game, "phase_summaries"):
+                game.phase_summaries = {}
+            agents, checkpoint_progress = restore_checkpoint(
+                game, {}, game_history, _payload, run_config
+            )
+            is_resuming = True
+            logger.info("[断点] 无存档，从断点重建对局（%s）。", _payload["phase"])
+        except Exception as exc:  # noqa: BLE001 - fall back to a new game
+            logger.warning("[断点] 断点重建失败（%s），开新局。", exc)
+            checkpoint_progress = None
+
+    if not _loaded_from_save and checkpoint_progress is None:
         game = Game(map_name=os.environ.get("DIP_MAP", "europe1939"))
         game.card_manager = CardManager()
         game_history = GameHistory()
         if not hasattr(game, "phase_summaries"):
             game.phase_summaries = {}
         agents = await initialize_new_game(run_config, game, game_history, llm_log_file_path)
+        # A fresh game must never pick up a stale checkpoint.
+        clear_checkpoint(run_dir)
 
     if getattr(game, "card_manager", None) is None:
         game.card_manager = CardManager()
@@ -465,58 +509,112 @@ async def main():
             break
 
         logger.info(f"PHASE: {current_phase} (time so far: {time.time() - start_whole:.2f}s)")
-        game_history.add_phase(current_phase)
-        card_manager = get_card_manager(game)
-        card_manager.begin_phase(current_phase)
-        # 1939 mechanics, phase start: expire/activate events, draw the yearly
-        # Spring event (before negotiations, so it is known during talks),
-        # and finalize winter exile funding before orders are generated.
-        mechanics = get_mechanics_manager(game)
-        if current_short_phase.endswith("M"):
-            mechanics.events.begin_phase(game, current_phase)
-            if is_spring_phase(current_phase):
-                mechanics.events.draw_event(game, game_history, current_phase)
-        if is_adjustment_phase(current_phase):
-            mechanics.exile.begin_winter(game, current_phase)
-            mechanics.peace.reserves.begin_winter(current_phase)
-        for agent in agents.values():
-            if agent.card_model_phases_remaining > 0:
-                agent.card_model_phases_remaining -= 1
-                if agent.card_model_phases_remaining == 0 and agent.card_original_model_id:
-                    replacement = load_model_client(agent.card_original_model_id, prompts_dir=agent.prompts_dir)
-                    replacement.max_tokens = agent.client.max_tokens
-                    replacement.set_system_prompt(agent.client.system_prompt)
-                    agent.client = replacement
-                    logger.info("[CARD] %s 结束模型牌，恢复 %s", agent.power_name, agent.card_original_model_id)
-                    agent.card_active_model_id = None
+        # A restored checkpoint already applied the phase-start effects
+        # (event draw, winter setup, card countdown) for this phase.
+        from_checkpoint = (
+            checkpoint_progress is not None
+            and checkpoint_progress.get("phase") == current_phase
+        )
+        if not from_checkpoint:
+            game_history.add_phase(current_phase)
+            card_manager = get_card_manager(game)
+            card_manager.begin_phase(current_phase)
+            # 1939 mechanics, phase start: expire/activate events, draw the yearly
+            # Spring event (before negotiations, so it is known during talks),
+            # and finalize winter exile funding before orders are generated.
+            mechanics = get_mechanics_manager(game)
+            if current_short_phase.endswith("M"):
+                mechanics.events.begin_phase(game, current_phase)
+                if is_spring_phase(current_phase):
+                    mechanics.events.draw_event(game, game_history, current_phase)
+            if is_adjustment_phase(current_phase):
+                mechanics.exile.begin_winter(game, current_phase)
+                mechanics.peace.reserves.begin_winter(current_phase)
+            for agent in agents.values():
+                if agent.card_model_phases_remaining > 0:
+                    agent.card_model_phases_remaining -= 1
+                    if agent.card_model_phases_remaining == 0 and agent.card_original_model_id:
+                        replacement = load_model_client(agent.card_original_model_id, prompts_dir=agent.prompts_dir)
+                        replacement.max_tokens = agent.client.max_tokens
+                        replacement.set_system_prompt(agent.client.system_prompt)
+                        agent.client = replacement
+                        logger.info("[CARD] %s 结束模型牌，恢复 %s", agent.power_name, agent.card_original_model_id)
+                        agent.card_active_model_id = None
+            # Phase-start checkpoint: preserves the event draw etc. even if
+            # the game dies during the first negotiation round.
+            await save_checkpoint(
+                run_dir, game, agents, game_history,
+                {"rounds_done": 0, "planning_done": False,
+                 "diaries_done": False, "round_message_counts": []},
+            )
+        else:
+            card_manager = get_card_manager(game)
+            mechanics = get_mechanics_manager(game)
+            logger.info("[断点] %s 从断点继续，跳过阶段开始步骤。", current_phase)
 
         # --- 4b. Pre-Order Generation Steps (Movement Phases Only) ---
         if current_short_phase.endswith("M"):
-            if run_config.num_negotiation_rounds > 0:
-                game_history = await conduct_negotiations(
-                    game, agents, game_history, model_error_stats,
-                    max_rounds=run_config.num_negotiation_rounds, log_file_path=llm_log_file_path,
+            _rounds_done = checkpoint_progress.get("rounds_done", 0) if from_checkpoint else 0
+            _neg_counts = list(checkpoint_progress.get("round_message_counts", [])) if from_checkpoint else []
+
+            async def _on_round_complete(round_index: int) -> None:
+                _phase = game_history._get_phase(current_short_phase)
+                _total = len(_phase.messages) if _phase is not None else 0
+                _neg_counts.append(_total - sum(_neg_counts))
+                await save_checkpoint(
+                    run_dir, game, agents, game_history,
+                    {"rounds_done": round_index + 1, "planning_done": False,
+                     "diaries_done": False, "round_message_counts": list(_neg_counts)},
                 )
-            if run_config.planning_phase:
+
+            if run_config.num_negotiation_rounds > 0:
+                if _rounds_done < run_config.num_negotiation_rounds:
+                    game_history = await conduct_negotiations(
+                        game, agents, game_history, model_error_stats,
+                        max_rounds=run_config.num_negotiation_rounds, log_file_path=llm_log_file_path,
+                        start_round=_rounds_done,
+                        round_message_counts=list(_neg_counts),
+                        on_round_complete=_on_round_complete,
+                    )
+                else:
+                    logger.info("[断点] 谈判 %d 轮已全部恢复，跳过。", run_config.num_negotiation_rounds)
+            _planning_done = checkpoint_progress.get("planning_done", False) if from_checkpoint else False
+            if run_config.planning_phase and not _planning_done:
                 await planning_phase(
                     game, agents, game_history, model_error_stats, log_file_path=llm_log_file_path,
                 )
-            
-            neg_diary_tasks = [
-                agent.generate_negotiation_diary_entry(game, game_history, llm_log_file_path)
-                for agent in agents.values() if is_active(game, agent.power_name)
-            ]
-            if neg_diary_tasks:
-                diary_results = await asyncio.gather(*neg_diary_tasks, return_exceptions=True)
-                if os.environ.get("DIP_STRICT_MODEL_RESPONSES") == "1":
-                    failures = [result for result in diary_results if isinstance(result, Exception)]
-                    if failures:
-                        raise RuntimeError(f"Strict model pause during diary generation: {failures[0]}") from failures[0]
-            # Exile decisions recorded in the diaries take effect before orders.
-            get_mechanics_manager(game).exile.resolve_pending(game, current_phase)
-            # 1937 systems: treaty/claim/parade intents and puppet requests.
-            get_mechanics_manager(game).peace.resolve_pending(game, current_phase)
-            get_mechanics_manager(game).puppets.resolve_pending(game, current_phase)
+                await save_checkpoint(
+                    run_dir, game, agents, game_history,
+                    {"rounds_done": run_config.num_negotiation_rounds, "planning_done": True,
+                     "diaries_done": False, "round_message_counts": list(_neg_counts)},
+                )
+            elif run_config.planning_phase:
+                logger.info("[断点] 规划阶段已恢复，跳过。")
+
+            _diaries_done = checkpoint_progress.get("diaries_done", False) if from_checkpoint else False
+            if not _diaries_done:
+                neg_diary_tasks = [
+                    agent.generate_negotiation_diary_entry(game, game_history, llm_log_file_path)
+                    for agent in agents.values() if is_active(game, agent.power_name)
+                ]
+                if neg_diary_tasks:
+                    diary_results = await asyncio.gather(*neg_diary_tasks, return_exceptions=True)
+                    if os.environ.get("DIP_STRICT_MODEL_RESPONSES") == "1":
+                        failures = [result for result in diary_results if isinstance(result, Exception)]
+                        if failures:
+                            raise RuntimeError(f"Strict model pause during diary generation: {failures[0]}") from failures[0]
+                # Exile decisions recorded in the diaries take effect before orders.
+                get_mechanics_manager(game).exile.resolve_pending(game, current_phase)
+                # 1937 systems: treaty/claim/parade intents and puppet requests.
+                get_mechanics_manager(game).peace.resolve_pending(game, current_phase)
+                get_mechanics_manager(game).puppets.resolve_pending(game, current_phase)
+                await save_checkpoint(
+                    run_dir, game, agents, game_history,
+                    {"rounds_done": run_config.num_negotiation_rounds, "planning_done": True,
+                     "diaries_done": True, "round_message_counts": list(_neg_counts)},
+                )
+            else:
+                logger.info("[断点] 谈判日记与机制决议已恢复，跳过。")
 
         # --- 4c. Parallel Order Generation and Diary Consolidation ---
         # Start diary consolidation in parallel with order generation
@@ -805,6 +903,9 @@ async def main():
 
         # --- 4f. Save State At End of Phase ---
         await save_game_state(game, agents, game_history, game_file_path, run_config, completed_phase)
+        # The phase settled: its checkpoint is obsolete.
+        clear_checkpoint(run_dir)
+        checkpoint_progress = None
         logger.info(f"Phase {current_phase} took {time.time() - phase_start:.2f}s")
 
     # --- 5. Game End ---

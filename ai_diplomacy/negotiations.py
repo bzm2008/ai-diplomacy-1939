@@ -37,6 +37,42 @@ def _is_feuding_pair(game: "Game", sender: str, recipient: str) -> bool:
     return pair is not None and {sender, recipient} == set(pair)
 
 
+def _rebuild_repetition_guard(game_history, short_phase, round_message_counts):
+    """Rebuild the consecutive-private-message guard from restored messages.
+
+    ``round_message_counts[i]`` is how many history messages round ``i``
+    (0-based) recorded, so the message list partitions exactly into rounds
+    and the guard state ends up identical to an uninterrupted run's. Messages
+    beyond the recorded counts (should not happen) are attributed to the last
+    skipped round. With no counts the guard starts empty.
+    """
+    last_sent_round = {}
+    awaiting_reply = {}
+    phase = game_history._get_phase(short_phase)
+    messages = list(phase.messages) if phase is not None else []
+    counts = list(round_message_counts or [])
+    idx = 0
+    for round_index, count in enumerate(counts):
+        for msg in messages[idx:idx + count]:
+            if msg.recipient == GLOBAL:
+                continue
+            pair = (msg.sender, msg.recipient)
+            last_sent_round[pair] = round_index
+            awaiting_reply[pair] = True
+            awaiting_reply[(msg.recipient, msg.sender)] = False
+        idx += count
+    if idx < len(messages) and counts:
+        last_round = len(counts) - 1
+        for msg in messages[idx:]:
+            if msg.recipient == GLOBAL:
+                continue
+            pair = (msg.sender, msg.recipient)
+            last_sent_round[pair] = last_round
+            awaiting_reply[pair] = True
+            awaiting_reply[(msg.recipient, msg.sender)] = False
+    return last_sent_round, awaiting_reply
+
+
 async def conduct_negotiations(
     game: "Game",
     agents: Dict[str, DiplomacyAgent],
@@ -44,6 +80,9 @@ async def conduct_negotiations(
     model_error_stats: Dict[str, Dict[str, int]],
     log_file_path: str,
     max_rounds: int = 3,
+    start_round: int = 0,
+    round_message_counts=None,
+    on_round_complete=None,
 ):
     """
     Conducts a round-robin conversation among all non-eliminated powers.
@@ -52,6 +91,12 @@ async def conduct_negotiations(
 
     NEW: Prevents a power from sending a private message to the same recipient
     in two consecutive rounds if that recipient has not replied yet.
+
+    Checkpoint resume: ``start_round`` skips already-completed rounds (their
+    messages must already be in ``game_history``); ``round_message_counts``
+    rebuilds the repetition guard from those messages; ``on_round_complete``
+    (an async callable taking the 0-based round index) runs after each round
+    so the caller can write a checkpoint.
     """
     logger.info("Starting negotiation phase.")
 
@@ -69,8 +114,16 @@ async def conduct_negotiations(
     awaiting_reply: Dict[tuple[str, str], bool] = {}
     # ────────────────────────────────────────────────────────────────
 
+    if start_round > 0:
+        last_sent_round, awaiting_reply = _rebuild_repetition_guard(
+            game_history, game.current_short_phase, round_message_counts
+        )
+        logger.info(
+            f"Resuming negotiations from round {start_round + 1}/{max_rounds} (checkpoint)."
+        )
+
     # We do up to 'max_rounds' single-message turns for each power
-    for round_index in range(max_rounds):
+    for round_index in range(start_round, max_rounds):
         minor_sent_counts: dict = {}
         logger.info(f"Negotiation Round {round_index + 1}/{max_rounds}")
 
@@ -241,6 +294,9 @@ async def conduct_negotiations(
                     f"{message.get('content', '')[:100]}..."
                 )
                 logger.info(f"[{power_name} -> {recipient}] {message.get('content', '')[:100]}...")
+
+        if on_round_complete is not None:
+            await on_round_complete(round_index)
 
     logger.info("Negotiation phase complete.")
     return game_history
