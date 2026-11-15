@@ -29,7 +29,7 @@ MODELS = [
     ("openai", "gpt-6-luna", "KUAIPAO_BASE", "KUAIPAO_KEY"),  # HOLLAND
     ("anthropic", "doubao-seed-2.1-turbo", "ARK_BASE", "ARK_AGENT_PLAN_CN_API_KEY"),  # ITALY
     ("openai", "gpt-6-luna", "KUAIPAO_BASE", "KUAIPAO_KEY"),  # NORWAY
-    ("openai", "glm-5.3", "KUAIPAO_BASE", "KUAIPAO_KEY"),  # POLAND
+    ("openai", "glm-5.3", "CN_BASE", "CN_KEY"),  # POLAND（主用 Max）
     ("openai", "gpt-6-luna", "KUAIPAO_BASE", "KUAIPAO_KEY"),  # PORTUGAL
     ("openai", "gpt-6-luna", "KUAIPAO_BASE", "KUAIPAO_KEY"),  # ROMANIA
     ("openai", "deepseek-v4.1-flash", "CN_BASE", "CN_KEY"),  # SOVIET
